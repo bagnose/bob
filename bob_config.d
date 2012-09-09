@@ -37,6 +37,9 @@ import std.getopt;
 import std.path;
 import std.file;
 import std.stdio;
+import std.process;
+import std.conv;
+import std.ascii;
 
 import core.stdc.stdlib;
 import core.sys.posix.sys.stat;
@@ -62,15 +65,15 @@ enum AppendType { notExist, mustExist, mayExist}
 // Append some tokens to the named element in vars,
 // appending only if not already present and preserving order.
 //
-private void append(ref Vars vars, string name, string[] extra, AppendType atype) {
-    switch (atype) {
-    case notExist:
-        ensure(name !in vars, "Cannot create variable %s again", name);
+private void append(ref Vars vars, string name, string[] extra, AppendType appendType) {
+    final switch (appendType) {
+    case AppendType.notExist:
+        assert(name !in vars, format("Cannot create variable '%s' again", name));
         break;
-    case mustExist:
-        ensure(name in vars, "Cannot add to non-existant variable %s", name);
+    case AppendType.mustExist:
+        assert(name in vars, format("Cannot add to non-existant variable '%s'", name));
         break;
-    case mayExist:
+    case AppendType.mayExist:
     }
 
     if (name !in vars) {
@@ -88,46 +91,28 @@ private void append(ref Vars vars, string name, string[] extra, AppendType atype
             vars[name] ~= item;
         }
     }
-}
-
-
-//
-// Return strings parsed from an environment variable, using ':' as the delimiter.
-//
-string[] fromEnv(string name) {
-    string[] result;
-    bool[string] got;
-    foreach (token; split(std.process.getenv(name), ":")) {
-        if (token !in got) {
-            got[token] = true;
-            result ~= token;
-        }
-    }
-    return result;
+    writefln("%s = %s", name, vars[name]);
 }
 
 
 //
 // Return a string to set an environment variable from a bob variable.
 //
-string toEnv(envName, const ref Vars vars, string varName, string[] extras) {
+string toEnv(string envName, const ref Vars vars, string varName, string[] extras) {
     string result;
     bool[string] got;
-    string[] candidates = fromEnv(name) ~ extras;
+    string[] candidates = extras;
     if (varName in vars) {
         candidates ~= vars[varName];
-        foreach (token; candidates) {
-            if (token !in got) {
-                got[token] = true;
-                result ~= token ~ ":";
-            }
-        }
-        if (result) {
-            result = result[0..$-1];
+    }
+    foreach (token; candidates) {
+        if (token !in got) {
+            got[token] = true;
+            result ~= token ~ ":";
         }
     }
     if (result) {
-        result = envName ~ "=\"" ~ result ~ "\"";
+        result = envName ~ "=\"" ~ result[0..$-1] ~ "\"\n";
     }
     return result;
 }
@@ -144,13 +129,13 @@ void update(string path, string content, bool executable) {
         clean = content == readText(path);
     }
     if (!clean) {
-        writeText(path, content);
+        std.file.write(path, content);
     }
 
     uint mode = executable ? octal!744 : octal!644;
     uint attr = getAttributes(path);
-    if ((attr & mode) != mode) {
-        setMode(path, mode | attr);
+    if (attr != mode) {
+        chmod(toStringz(path), mode);
     }
 }
 
@@ -163,7 +148,7 @@ void update(string path, string content, bool executable) {
 //
 // Set up build directory.
 //
-void establishBuildDir(string buildDir, string srcDir, string desc, const Vars vars) {
+void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
 
     // Create build directory.
     if (!exists(buildDir)) {
@@ -177,35 +162,37 @@ void establishBuildDir(string buildDir, string srcDir, string desc, const Vars v
 
     // Create Boboptions file from vars.
     string bobText;
-    foreach (string key, string[] tokens; vars) {
-        bobText ~= key ~ " = ";
+    foreach (string var; vars.keys().sort) {
+        const string[] tokens = vars[var];
+        bobText ~= var ~ " =";
         foreach (token; tokens) {
-            bobText ~= token ~ " ";
+            bobText ~= " " ~ token;
         }
-        bobText ~= ";\n";
+        bobText ~= '\n';
     }
     update(buildPath(buildDir, "Boboptions"), bobText, false);
 
 
     // Create clean script.
-    update(buildPath(buildDir, "clean", "rm -rf ./dist ./priv ./obj", true);
+    update(buildPath(buildDir, "clean"), "rm -rf ./dist ./priv ./obj ./tmp", true);
 
 
     // Create environment file.
     string envText;
-    string lib = buildPath(buildDir, "dist", "lib");
-    string bin = buildPath(buildDir, "dist", "bin");
-    envText ~= "#!/bin/bash\n# Set up the run environment variables.\n\n";
+    string lib  = buildPath(buildDir, "dist", "lib");
+    string bin  = buildPath(buildDir, "dist", "bin");
+    string data = buildPath(buildDir, "dist", "data");
+    string env  = buildPath(buildDir, "environment");
+    envText ~= "#!/bin/bash\n";
     envText ~= toEnv("LD_LIBRARY_PATH", vars, "SYS_LIB",  [lib]);
-    envText ~= toEnv("PATH",            vars, "SYS_PATH", [bin]);
-    update(buildPath(buildDir, "environment-run"), runEnvText, false);
+    envText ~= toEnv("PATH",            vars, "SYS_PATH", [bin, "/bin", "/usr/bin"]);
+    envText ~= "DIST_DATA_PATH=\"" ~ data ~ "\"\n";
+    update(env, envText, false);
 
 
     // Create run script
     update(buildPath(buildDir, "run"),
-           "#!/bin/bash\n"
-           "source " ~ buildPath(buidDir, "environment") ~ "\n"
-           "$1\n",
+           "#!/bin/bash\nsource " ~ env ~ "\nexec \"$@\"\n",
            true); 
 
 
@@ -222,9 +209,9 @@ void establishBuildDir(string buildDir, string srcDir, string desc, const Vars v
 
     // Make a symbolic link to each top-level package in this and other specified repos.
     string[string] pkgPaths;  // Package paths keyed on package name.
-    ensure("PROJECT" in vars && vars[project].length, "PROJECT variable is not set");
+    assert("PROJECT" in vars && vars["PROJECT"].length, "PROJECT variable is not set");
     string project = vars["PROJECT"][0];
-    string[] reposPaths = [srcDir];
+    string[] repoPaths = [srcDir];
     if ("REPOS" in vars) {
         foreach (path; vars["REPOS"]) {
             repoPaths ~= buildPath(srcDir, path);
@@ -237,7 +224,7 @@ void establishBuildDir(string buildDir, string srcDir, string desc, const Vars v
                 string pkgName = baseName(path);
                 if (isDir(path) && pkgName[0] != '.') {
                     writefln("  Found top-level package %s.", pkgName);
-                    ensure(pkgName !in pkgPaths,
+                    assert(pkgName !in pkgPaths,
                            format("Package %s found at %s and %s",
                                   pkgName, pkgPaths[pkgName], path));
                     pkgPaths[pkgName] = path;
@@ -260,58 +247,54 @@ void establishBuildDir(string buildDir, string srcDir, string desc, const Vars v
 //
 Vars parseConfig(string configFile, string mode) {
 
-    enum Section { none, defines, modes, commands }
+    enum Section { none, defines, modes }
 
-    int     anchor;
-    int     line = 1;
-    int     col  = 0;
     Section section = Section.none;
     bool    inMode;
     string  commandType;
     Vars    vars;
 
-    foreach (string line; spitLines(readText(configFile))) {
+    string content = readText(configFile);
+    foreach (string line; splitLines(content)) {
 
         // Skip comment lines.
-        if (line && line[0] == '#') continue;
+        if (!line.length || line[0] == '#') continue;
 
-        string[] tokens = split(line);
+        writefln("processing line: %s", line);
 
-        if (tokens && tokens[0] && tokens[0][0] == '[') {
+        if (line.length && line[0] == '[' && line[$-1] == ']') {
             // Start of a section
-            section = to!Section(tokens[0][1..$-1]);
+            section = to!Section(line[1..$-1]);
+            writefln("Entered section %s", to!string(section));
         }
 
         else {
             if (section == Section.defines) {
-                if (tokens.length >= 2 && tokens[1] == "=") {
+                string[] tokens = split(line, " =");
+                if (tokens.length == 2) {
                     // Define a new variable.
-                    vars.append(tokens[0], tokens[2..$], AppendType.notExist);
+                    vars.append(strip(tokens[0]), split(tokens[1]), AppendType.notExist);
                 }
             }
 
             else if (section == Section.modes) {
-                if (!tokens) {
+                if (!line.length) {
+                    // Blank line - mode ended.
                     inMode = false;
                 }
-                else if (tokens.length == 1 && !isWhite(line[0])) {
-                    inMode = tokens[0] == mode;
+                else if (!isWhite(line[0])) {
+                    // We are in a mode, which might be the one we want.
+                    inMode = strip(line) == mode;
+                    if (inMode) {
+                        writefln("Found mode %s", mode);
+                    }
                 }
-                else if (isWhite(line[0]) && tokens.length >= 2 && tokens[1] == "+=") {
+                else if (inMode) {
                     // Add to an existing variable
-                    vars.append(tokens[0], tokens[2..$], AppendType.mustExist);
-                }
-            }
-
-            else if (section == Section.commands) {
-                if (!tokens) {
-                    commandType = "";
-                }
-                else if (tokens && !isWhite(line[0]) {
-                    commandType = strip(line);
-                }
-                else if (commandType && tokens && isWhite(line[0])) {
-                    vars.append(commandType, strip(line), AppendType.mayExist);
+                    string[] tokens = split(line, " +=");
+                    if (tokens.length == 2) {
+                        vars.append(strip(tokens[0]), split(tokens[1]), AppendType.mustExist);
+                    }
                 }
             }
         }
@@ -326,23 +309,20 @@ Vars parseConfig(string configFile, string mode) {
 //
 int main(string[] args) {
 
-    bool     help;
-    string   mode;
-    string   desc       = "Development build from " ~ getcwd;
-    string   configFile = "bob.cfg";
-    string   buildDir;
-
     //
     // Parse command-line arguments.
     //
+
+    bool     help;
+    string   mode;
+    string   configFile = "bob.cfg";
 
     try {
         getopt(args,
                std.getopt.config.caseSensitive,
                "help",   &help,
                "mode",   &mode,
-               "config", &configFile,
-               "desc",   &desc);
+               "config", &configFile);
     }
     catch (Exception ex) {
         writefln("Invalid argument(s): %s", ex.msg);
@@ -353,7 +333,6 @@ int main(string[] args) {
         writefln("Usage: %s [options] build-dir-path\n"
                  "  --help                Display this message.\n"
                  "  --mode=mode-name      Build mode.\n"
-                 "  --desc=description    Defines DESCRIPTION.\n"
                  "  --config=config-file  Specifies the config file. Default bob.cfg.\n",
                  args[0]);
         exit(1);
@@ -368,7 +347,7 @@ int main(string[] args) {
     //
 
     Vars vars = parseConfig(configFile, mode);
-    establishBuildDir(buildDir, srcDir, desc, vars);
+    establishBuildDir(buildDir, srcDir, vars);
 
     return 0;
 }
