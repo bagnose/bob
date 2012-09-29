@@ -1,0 +1,14 @@
+static-lib lib1 :
+                  one.h
+                :
+                  one.c
+                :
+                  pthread m
+                ;
+
+static-lib lib2 : three.d ;
+
+#text-exe test-one : test_one.cpp;
+#test-exe test-two : test_two.d;
+
+#dynamic-lib lib1 : lib1;

@@ -17,9 +17,6 @@
  * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-
-module bob;
-
 import std.stdio;
 import std.ascii;
 import std.string;
@@ -39,8 +36,14 @@ import std.exception;
 import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
+// TODO
+// * Recursive variable expansion.
+// * Dependence on built generation tools.
+// * Elimination of specific statements.
+// * Generation of documentation from the code.
+// * Get it all working.
 
-/*========================================================================
+/*
 
 A build tool suitable for C/C++ and D code, written in D.
 
@@ -56,29 +59,7 @@ Objectives of this build tool are:
   - A source file isn't scanned for imports/includes until after it is up to date.
   - Dependencies inferred from these imports are automatically applied.
 
-
-Directory Structure
--------------------
-
-The source code is arranged into repositories, and within repositories
-into packages which correspond to the directory structure.
-
-Packages should contain not only library source code, but also tests, utilities,
-documentation and data. The intention is to make packages easily reusable
-by putting all their pieces in one location.
-
-A typical directory structure is:
-
-repo                         repository
-  |
-  +--package-name      package's Bobfile and library source
-        |
-        +--doc         the package's documentation
-        +--data        data files needed by the package
-        +--test        source code for automated regression tests
-        +--util        source code for non-test executables
-        |
-        +--child-package(s)
+Refer to README and INSTRUCTIONS and examples for details on how to use bob.
 
 
 Dependency rules
@@ -99,126 +80,6 @@ An object file can only be used once - either in a library or an executable.
 Dynamic libraries don't count as a use - they are just a repackaging.
 
 A dynamic library cannot contain the same static library as another dynamic library.
-
-
-Configure
----------
-
-Bundled with bob is a configure procedure that is mainly implemented in
-configure_functions.d. Each project contains a configure.d program that
-is invoked via a configure.sh script.
-
-Configure establishes a build directory complete with scripts necessary
-to build and run a project.
-
-Refer to configure_functions.d for details.
-
-
-Bobfiles
---------
-
-Each package has a Bobfile. On start, bob (the builder) reads the
-Bobfile specified in the Boboptions file and follows its directives.
-
-Bobfiles must refer to things in dependency order, so that anything referred
-to is defined earlier.
-
-
-General rule format in Bobfiles is:
-
-# This line is a comment.
-
-# General form of a rule. Arguments are space-separated tokens. Args are optional.
-rulename target : sources : arg1 : arg2 : arg3;
-
-# Resolves to 0 or 1 rule, choosing the first that matches an architecture specified
-# during configure. [] is a default that matches regardless of architecture.
-ARCHITECTURE{
-    [arch-1] rulename target : arg1 : arg2 : arg3;
-    [arch-2] rulename target : arg1 : arg2 : arg3;
-    []       rulename target : arg1 : arg2 : arg3;
-}
-
-
-Specific rules are:
-
-# This package contains packages. eg: package math ipc;
-package names [: protected];  # defaults to public
-
-# This package refers to others. eg: refer math ipc;
-# Referenced packages are specified by path relative to root. eg: icp/client
-refer packages;
-
-# Library: for D/C/C++, list both header and body files, all of which must be local.
-# eg: static-lib math : matrix.h : matrix.cc : m;
-static-lib  name : public-sources : protected-sources : required-system-libs;
-
-# dynamic-libs can only contain static-libs within their package or its
-# children. The contained static-libs are specified as a relative name trail,
-# with the last element optionally omitted if it is the same as the package name.
-# eg: dynamic-lib ipc : common client server;
-dynamic-lib name : static-libs;
-dynamic-lib name : static-libs : plugin;
-
-
-# Executables: makes an exe from a single source file and any libs deduced from
-# imports and includes. Also links with specified system libs, plus any specified
-# by deduced libraries.
-# Tests are auto-executed and build fails on test error.
-test-util name : source : required-system-libs; # source file in test dir or generated
-priv-util name : source : required-system-libs; # source file in util dir or generated
-dist-util name : source : required-system-libs; # source file in util dir or generated
-
-# Shell
-priv-shell name; # source file in util dir or generated
-dist-shell name; # source file in util dir or generated
-
-# Data - any dirs named specify whole contained tree, not including symlinks
-test-data name;  # source in data dir or generated.
-dist-data name;  # source in data dir or generated.
-
-# Docco - rst files converted to html
-doc names;        # source in doc dir or generated.
-doc-data names;   # source in doc dir or generated.
-
-
-Build directory structure
--------------------------
-
-Bob assumes that a build directory has been established
-by an earlier configure operation. The configure sets up
-a Boboptions file containing definitions of variables used by rules.
-
-The format of Boboptions is:
-key = value;
-
-Usually bob is invoked from a build script established during configure.
-
-Under the build directory we have:
-
-obj
-  static-libs
-  packages(s)
-    obj-files
-    generated-sources
-    packages(s)
-priv
-  package(s)
-    test-exes
-    util-exes
-    test
-      test-exe-specific-test-dir(s)
-        test-results
-        test-working-files
-    doc
-      docs
-    package(s)
-dist
-  data      All dist-data
-  lib       All dynamic-libs except plugins
-    plugin  Dynalic-libs designated as plugins
-  bin       All dist-util
-
 
 
 Search paths
@@ -266,8 +127,7 @@ Results cause the dependency graph to be updated, allowing more actions to
 be issued. Specifically, generated source files are scanned for import/include
 after they are up to date, and the dependency graph and action commands are
 adjusted accordingly.
-
-//==========================================================================*/
+*/
 
 //-----------------------------------------------------------------------------------------
 // PriorityQueue - insert items in any order, and remove largest-first
@@ -419,27 +279,39 @@ synchronized class Launcher {
 }
 
 shared Launcher launcher;
+__gshared Tid   bailerTid;
 
-void doBail() {
-    launcher.bail;
-}
-extern (C) void mySignalHandler(int sig) {
-    // launch a thread to initiate a bail
-    say("got signal %s", sig);
-    spawn(&doBail);
+void doBailer() {
+
+    void bail(int sig) {
+        say("Got signal %s", sig);
+        launcher.bail();
+    }
+
+    bool done;
+    while (!done) {
+        receive( (int sig)      { bail(sig); },
+                 (string dummy) { done = true; }
+               );
+    }
 }
 
+extern (C) void mySignalHandler(int sig) nothrow {
+    try {
+        send(bailerTid, sig);
+    }
+    catch (Exception ex) { assert(0, format("Unexpected exception: %s", ex)); }
+}
 
 shared static this() {
     // set up shared Launcher and signal handling
 
-    launcher = new shared(Launcher)();
+    launcher  = new shared(Launcher)();
 
     signal(SIGTERM, &mySignalHandler);
     signal(SIGINT,  &mySignalHandler);
     signal(SIGHUP,  &mySignalHandler);
 }
-
 
 
 //------------------------------------------------------------------------------
@@ -488,17 +360,6 @@ void errorUnless(A ...)(bool condition, Origin origin, lazy string fmt, lazy A a
 //-------------------------------------------------------------------------
 
 //
-// Return the given path with the top level directory removed
-//
-string clip(string path) {
-    for (uint i = 0; i < path.length; ++i) {
-        if (isDirSeparator(path[i])) return path[i+1..$];
-    }
-    return "";
-}
-
-
-//
 // Ensure that the parent dir of path exists
 //
 void ensureParent(string path) {
@@ -538,15 +399,31 @@ long modifiedTime(string path, bool isTarget) {
 //
 Privacy privacyOf(ref Origin origin, string[] args) {
     if (!args.length ) return Privacy.PUBLIC;
-    else if (args[0] == "protected") return Privacy.PROTECTED;
+    else if (args[0] == "protected")      return Privacy.PROTECTED;
     else if (args[0] == "semi-protected") return Privacy.SEMI_PROTECTED;
-    else if (args[0] == "private")   return Privacy.PRIVATE;
-    else if (args[0] == "public")    return Privacy.PUBLIC;
+    else if (args[0] == "private")        return Privacy.PRIVATE;
+    else if (args[0] == "public")         return Privacy.PUBLIC;
     else error(origin, "privacy must be one of public, semi-protected, protected or private");
     assert(0);
 }
 
 
+//
+// Return true if the given suffix implies a scannable file.
+//
+bool isScannable(string suffix) {
+    string ext = extension(suffix);
+    if (ext is null) ext = suffix;
+    bool ret = 
+        ext == ".c"   ||
+        ext == ".h"   ||
+        ext == ".cc"  ||
+        ext == ".cpp" ||
+        ext == ".hpp" ||
+        ext == ".hh"  ||
+        ext == ".d";
+    return ret;
+}
 
 
 //------------------------------------------------------------------------
@@ -554,15 +431,41 @@ Privacy privacyOf(ref Origin origin, string[] args) {
 //------------------------------------------------------------------------
 
 //
-// options read from Boboptions file
+// Options read from Boboptions file
 //
+
+// General variables
 string[string] options;
-bool[string]   architectures;
-bool[string]   validArchitectures;
+
+// Commmands to compile a source file into an object file
+struct CompileCommand {
+    string   command;
+}
+CompileCommand[string] compileCommands; // keyed on input extension
+
+// Commands to generate files other than reserved extensions
+struct GenerateCommand {
+    string[] suffixes;
+    string   command;
+}
+GenerateCommand[string] generateCommands; // keyed on input extension
+
+// Commands that work with object files
+struct LinkCommand {
+    string staticLib;
+    string dynamicLib;
+    string executable;
+}
+LinkCommand[string] linkCommands; // keyed on source extension
+
+bool[string] reservedExts;
+static this() {
+    reservedExts = [".obj":true, ".slib":true, ".dlib":true, ".exe":true];
+}
 
 //
-// Read an options file, populating options
-// Format is:   key=value;\n
+// Read an options file, populating option lines
+// Format is:   key = value
 // value can contain '='
 //
 void readOptions() {
@@ -572,37 +475,62 @@ void readOptions() {
     errorUnless(exists(path) && isFile(path), origin, "can't read Boboptions %s", path);
 
     string content = readText(path);
+    foreach (line; splitLines(content)) {
+        string[] tokens = split(line, " = ");
+        if (tokens.length == 2) {
+            string key   = strip(tokens[0]);
+            string value = strip(tokens[1]);
+            if (key[0] == '.') {
+                // A command of some sort
 
-    string key;
-    int anchor = 0;
-    foreach (int pos, char ch ; content) {
-        if (ch == '\n') ++origin.line;
-        if (key is null && ch == '=') {
-            key = strip(content[anchor..pos]);
-            anchor = pos + 1;
-        }
-        else if (ch == ';') {
-            if (key is null) error(origin, "option terminated without a key");
-            string str = strip(content[anchor..pos]);
-            if (key == "VALID_ARCHITECTURES") {
-                foreach (arch; split(str)) {
-                    validArchitectures[arch] = true;
+                string[] extensions = split(key);
+                if (extensions.length < 2) {
+                    fatal("Commands require at least two extensions: %s", line);
+                }
+                string   input   = extensions[0];
+                string[] outputs = extensions[1..$];
+
+                errorUnless(input !in reservedExts, origin,
+                            "Cannot use %s as source ext in commands", input);
+
+                if (outputs.length == 1 && (outputs[0] == ".slib" ||
+                                            outputs[0] == ".dlib" ||
+                                            outputs[0] == ".exe")) {
+                    // A link command
+                    if (input !in linkCommands) {
+                        linkCommands[input] = LinkCommand("", "", "");
+                    }
+                    LinkCommand *linkCommand = input in linkCommands;
+                    if (outputs[0] == ".slib") linkCommand.staticLib  = value;
+                    if (outputs[0] == ".dlib") linkCommand.dynamicLib = value;
+                    if (outputs[0] == ".exe")  linkCommand.executable = value;
+                }
+                else if (outputs.length == 1 && outputs[0] == ".obj") {
+                    // A compile command
+                    errorUnless(input !in compileCommands && input !in generateCommands,
+                                origin, "Multiple compile/generate commands using %s", input);
+                    compileCommands[input] = CompileCommand(value);
+                }
+                else {
+                    // A generate command
+                    errorUnless(input !in compileCommands && input !in generateCommands,
+                                origin, "Multiple compile/generate commands using %s", input);
+                    foreach (ext; outputs) {
+                        errorUnless(ext !in reservedExts, origin,
+                                    "Cannot use %s in a generate command: %s", ext, line);
+                    }
+                    generateCommands[input] = GenerateCommand(outputs, value);
                 }
             }
-            else if (key == "ARCHITECTURES") {
-                foreach (arch; split(str)) {
-                    architectures[arch] = true;
-                }
+            else {
+                // A variable
+                options[key] = value;
             }
-            options[key] = str;
-            key = null;
         }
-        else if (ch == '\n') {
-            errorUnless(key is null, origin, "option %s not terminated with ';'", key);
-            anchor = pos + 1;
+        else {
+            fatal("Invalid Boboptions line: %s", line);
         }
     }
-    errorUnless(key is null, origin, "%s ends in unterminated option", path);
 }
 
 string getOption(string key) {
@@ -614,7 +542,6 @@ string getOption(string key) {
         return "";
     }
 }
-
 
 
 //
@@ -722,7 +649,7 @@ Include[] scanForImports(string path) {
     int anchor, line=1;
     bool inWord, inImport, ignoring;
 
-    string[] externals = split(getOption("DEXTERNALS"));
+    string[] externals = split(getOption("D_EXTERN"));
 
     foreach (int pos, char ch; content) {
         if (ch == '\n') {
@@ -801,14 +728,7 @@ Include[] scanForImports(string path) {
 // //  a simple statement
 // rulename targets... : arg1... : arg2... : arg3...; // can expand Boboptions variable with ${var-name}
 //
-// // a conditional statement resolving to 0 or one of its constituents, based on ARCHITECTURE Boboption.
-// ARCHITECTURE{
-//   [arch-1] rulename targets... : arg1... : arg2... ;
-//   [arch-2] rulename targets... : arg1... : arg2... ;
-//   []       rulename targets... : arg1... : arg2... ; // optional default
-// }
-//
-//
+
 struct Statement {
     Origin   origin;
     int      phase;    // 0==>empty, 1==>rule populated, 2==rule,targets populated, etc
@@ -835,14 +755,11 @@ Statement[] readBobfile(string path) {
     errorUnless(exists(path) && isFile(path), origin, "can't read Bobfile %s", path);
 
     string content = readText(path);
-    Statement statement;
 
-    int anchor = 0;
-    bool inWord = false;
-    bool inComment = false;
-    bool inCondition = false;
-    bool conditionMatch = false;
-    bool conditionSatisfied = false;
+    int       anchor;
+    bool      inWord;
+    bool      inComment;
+    Statement statement;
 
     foreach (int pos, char ch ; content) {
         if (ch == '\n') {
@@ -863,66 +780,35 @@ Statement[] readBobfile(string path) {
                 inWord = false;
                 string word = content[anchor..pos];
 
-                if (word == "ARCHITECTURE{") {
-                    // start an architecture condition
-                    errorUnless(!inCondition, origin,
-                                 "nested ARCHITECTURE condition in %s", path);
-                    errorUnless(statement.phase == 0, origin,
-                                 "ARCHITECTURE condition inside a statement in %s", path);
-                    inCondition = true;
-                    conditionMatch = false;
-                    conditionSatisfied = false;
+                // should be a word in a statement
+
+                string[] words = [word];
+
+                if (word.length > 3 && word[0..2] == "${" && word[$-1] == '}') {
+                    // macro substitution
+                    words = split(getOption(word[2..$-1]));
                 }
-                else if (word.length >= 2 && word[0] == '[' && word[$-1] == ']') {
-                    // architecture specifier preceeds statement
-                    string architecture = word[1..$-1];
-                    errorUnless(inCondition, origin,
-                                 "architecture '%s' specifier when not in condition in %s",
-                                 architecture, path);
-                    errorUnless(statement.phase == 0, origin,
-                                 "nested statements in %s near %s", path, word);
-                    errorUnless(architecture == "" || architecture in validArchitectures, origin,
-                                 "invalid architecture '%s' in %s", architecture, path);
-                    if (!conditionSatisfied && (architecture == "" || architecture in architectures)) {
-                        conditionMatch = true;
+
+                if (word.length > 0) {
+                    if (statement.phase == 0) {
+                        statement.origin = origin;
+                        statement.rule = words[0];
+                        ++statement.phase;
                     }
-                }
-                else if (word == "}") {
-                    inCondition = false;
-                    conditionMatch = false;
-                    conditionSatisfied = false;
-                }
-                else {
-                    // should be a word in a statement
-
-                    string[] words = [word];
-
-                    if (word.length > 3 && word[0..2] == "${" && word[$-1] == '}') {
-                        // macro substitution
-                        words = split(getOption(word[2..$-1]));
+                    else if (statement.phase == 1) {
+                        statement.targets ~= words;
                     }
-
-                    if (word.length > 0) {
-                        if (statement.phase == 0) {
-                            statement.origin = origin;
-                            statement.rule = words[0];
-                            ++statement.phase;
-                        }
-                        else if (statement.phase == 1) {
-                            statement.targets ~= words;
-                        }
-                        else if (statement.phase == 2) {
-                            statement.arg1 ~= words;
-                        }
-                        else if (statement.phase == 3) {
-                            statement.arg2 ~= words;
-                        }
-                        else if (statement.phase == 4) {
-                            statement.arg3 ~= words;
-                        }
-                        else {
-                            error(origin, "Too many arguments in %s", path);
-                        }
+                    else if (statement.phase == 2) {
+                        statement.arg1 ~= words;
+                    }
+                    else if (statement.phase == 3) {
+                        statement.arg2 ~= words;
+                    }
+                    else if (statement.phase == 4) {
+                        statement.arg3 ~= words;
+                    }
+                    else {
+                        error(origin, "Too many arguments in %s", path);
                     }
                 }
             }
@@ -930,13 +816,8 @@ Statement[] readBobfile(string path) {
             if (ch == ':' || ch == ';') {
                 ++statement.phase;
                 if (ch == ';') {
-                    if (statement.phase > 1 && (!inCondition || conditionMatch)) {
+                    if (statement.phase > 1) {
                         statements ~= statement;
-                        if (inCondition) {
-                            conditionSatisfied = true;
-                            conditionMatch = false;
-                            //say("conditional resolves to statement '%s'", statement.toString);
-                        }
                     }
                     statement = statement.init;
                 }
@@ -947,7 +828,7 @@ Statement[] readBobfile(string path) {
             anchor = pos;
         }
     }
-    errorUnless(statement.phase == 0, origin, "%s ends in unterminated rule", path);
+    errorUnless(statement.phase == 0, origin, "%s ends in unterminated statement", path);
     return statements;
 }
 
@@ -983,23 +864,26 @@ final class Action {
     static int                  nextNumber;
     static PriorityQueue!Action queue;
 
-    string  name;    // the name of the action
-    string  command; // the action command-string
-    int     number;  // influences build order
-    File[]  builds;  // files that this action builds
-    File[]  depends; // files that the action's targets depend on
-    bool    issued;  // true if the action has been issued to a worker
+    string  name;      // the name of the action
+    string  command;   // the action command-string
+    int     number;    // influences build order
+    File[]  inputs;    // files the action directly relies on
+    File[]  builds;    // files that this action builds
+    File[]  depends;   // files that the action's targets depend on
+    bool    finalised; // true if the action command has been finalised
+    bool    issued;    // true if the action has been issued to a worker
 
     this(ref Origin origin, string name_, string command_, File[] builds_, File[] depends_) {
         name     = name_;
         command  = command_;
         number   = nextNumber++;
+        inputs   = depends_;
         builds   = builds_;
         depends  = depends_;
         errorUnless(!(name in byName), origin, "Duplicate command name=%s", name);
         byName[name] = this;
 
-        // add the bobfile responsible for all the files built by this action
+        // All the files built by this action depend on the Bobfile
         File bobfile;
         foreach (build; builds) {
             File b = build.bobfile;
@@ -1034,16 +918,123 @@ final class Action {
         }
     }
 
-    // augment this action's command string with some text
-    void augment(string augmentation) {
+    // Finalise the action command.
+    // Commands can contain any number of ${varname} instances, which are
+    // replaced with the content of the named variable, cross-multiplied with
+    // any adjacent text.
+    // Special variables are:
+    //   INPUT    -> Paths of the input files. 
+    //   OUTPUT   -> Paths of the built files.
+    //   PROJ_INC -> Paths of project include/import dirs relative to build dir.
+    //   PROJ_LIB -> Paths of project library dirs relative to build dir.
+    //   LIBS     -> Names of all required libraries, without lib prefix or extension.
+    void finaliseCommand(string[] libs) {
         assert(!issued);
-        command ~= augmentation;
-    }
+        finalised = true;
 
+        string resolve(string text) {
+            string result;
+
+            bool   inToken, inCurly;
+            size_t anchor;
+            char   prev;
+            string prefix, varname, suffix;
+
+            // Local function to finish processing a token
+            void finishToken(size_t pos) {
+                suffix = text[anchor..pos];
+                size_t start = result.length;
+
+                string[] values;
+                if (varname.length) {
+                    // Get the variable's values
+                    if      (varname == "INPUT") {
+                        foreach (file; inputs) {
+                            values ~= file.path;
+                        }
+                    }
+                    else if (varname == "OUTPUT") {
+                        foreach (file; builds) {
+                            values ~= file.path;
+                        }
+                    }
+                    else if (varname == "PROJ_INC") {
+                        values = ["src", "obj"];
+                    }
+                    else if (varname == "PROJ_LIB") {
+                        values = ["dist/lib", "obj"];
+                    }
+                    else if (varname == "LIBS") {
+                        values = libs;
+                    }
+                    else if (varname in options) {
+                        values = split(resolve(options[varname]));
+                    }
+                    else {
+                        // Not in Boboptions, so it evaluated to empty.
+                        values = [];
+                    }
+
+                    // Cross-multiply with prefix and suffix
+                    foreach (value; values) {
+                        result ~= prefix ~ value ~ suffix ~ " ";
+                    }
+                }
+                else {
+                    // No variable - just use the suffix
+                    result ~= suffix ~ " ";
+                }
+
+                // Clean up for next token
+                prefix  = "";
+                varname = "";
+                suffix  = "";
+                inToken = false;
+                inCurly = false;
+            }
+
+            foreach (pos, ch; text) {
+                if (!inToken && !isWhite(ch)) { 
+                    // Starting a token
+                    inToken = true;
+                    anchor  = pos;
+                }
+                else if (inToken && ch == '{' && prev == '$') {
+                    // Starting a varname within a token
+                    prefix  = text[anchor..pos-1];
+                    inCurly = true;
+                    anchor  = pos + 1;
+                }
+                else if (ch == '}') {
+                    // Finished a varname within a token
+                    if (!inCurly) {
+                        fatal("Unmatched '}' in '%s'", text);
+                    }
+                    varname = text[anchor..pos];
+                    inCurly = false;
+                    anchor  = pos + 1;
+                }
+                else if (inToken && isWhite(ch)) {
+                    // Finished a token
+                    finishToken(pos);
+                }
+                prev = ch;
+            }
+            if (inToken) {
+                finishToken(text.length);
+            }
+            return result;
+        }
+
+        command = resolve(command);
+    }
 
     // issue this action
     void issue() {
         assert(!issued);
+        if (!finalised) {
+            finaliseCommand([]);
+        }
         issued = true;
         queue.insert(this);
     }
@@ -1170,7 +1161,7 @@ class Node {
         }
         foreach (node; refers) {
             // referred-to nodes grant access to their public children, and referred-to
-            // suiblings grant access to their semi-protected children
+            // siblings grant access to their semi-protected children
             if (node !in checked) {
                 checked[node] = true;
                 if (node.allowsRefTo(origin,
@@ -1206,7 +1197,8 @@ class Node {
 
 
 //
-// Pkg - a package. Has a Bobfile, assorted source and built files, and sub-packages
+// Pkg - a package (directory containing a Bobfile).
+// Has a Bobfile, assorted source and built files, and sub-packages
 // Used to group files together for dependency control, and to house a Bobfile.
 //
 final class Pkg : Node {
@@ -1218,7 +1210,6 @@ final class Pkg : Node {
         bobfile = File.addSource(origin, this, "Bobfile", Privacy.PRIVATE, false);
     }
 }
-
 
 
 //
@@ -1256,7 +1247,6 @@ class File : Node {
     File       youngestDepend;
     File       youngestInclude;
 
-
     // return a prospective path to a potential file.
     static string prospectivePath(string start, Node parent, string extra) {
         Node node = parent;
@@ -1285,7 +1275,9 @@ class File : Node {
         assert(0);
     }
 
-    this(ref Origin origin, Node parent_, string name_, Privacy privacy_, string path_, bool scannable_, bool built_) {
+    this(ref Origin origin, Node parent_, string name_, Privacy privacy_, string path_,
+         bool scannable_, bool built_)
+    {
         super(origin, parent_, name_, privacy_);
 
         path      = path_;
@@ -1303,16 +1295,14 @@ class File : Node {
             //say("built file %s", path);
             ++numBuilt;
         }
-
     }
 
     // Add a source file specifying its trail within its package
     static File addSource(ref Origin origin, Node parent, string extra, Privacy privacy, bool scannable) {
 
-        // three possible paths to the file
+        // possible paths to the file
         string path1 = prospectivePath("obj", parent, extra);  // a built file in obj directory tree
         string path2 = prospectivePath("src", parent, extra);  // a source file in src directory tree
-        string path3 = baseName(extra);                        // a configure-generated source file in build directory
 
         string name  = baseName(extra);
 
@@ -1326,12 +1316,8 @@ class File : Node {
             // a source file under src
             return new File(origin, parent, name, privacy, path2, scannable, false);
         }
-        else if (exists(path3)) {
-            // a source file in build dir
-            return new File(origin, parent, name, privacy, path3, scannable, false);
-        }
         else {
-            error(origin, "Could not find source file %s in %s, %s or %s", name, path1, path2, path3);
+            error(origin, "Could not find source file %s in %s, or %s", name, path1, path2);
             assert(0);
         }
     }
@@ -1348,7 +1334,7 @@ class File : Node {
         touch;
     }
 
-    // Scan this file for includes, returning them after making sure those files
+    // Scan this file for includes/imports, returning them after making sure those files
     // themselves exist and have already been scanned for includes
     private void scan() {
         errorUnless(!scanned, Origin(path, 1), "%s has been scanned for includes twice!", this);
@@ -1358,7 +1344,7 @@ class File : Node {
             // scan for includes that are part of the project, and thus must already be known
             Include[] entries;
             string ext = extension(path);
-            if (ext == ".c" || ext == ".cc" || ext == ".h") {
+            if (ext == ".c" || ext == ".cc" || ext == ".cpp" || ext == ".h") {
                 entries = scanForIncludes(path);
             }
             else if (ext == ".d") {
@@ -1422,9 +1408,13 @@ class File : Node {
 
 
     // This file's action is about to be issued, and this is the last chance to
-    // augment its action. Specialisation should override this method if augmentation
-    // is required. Return true if dependencies were added.
+    // add dependencies to it. Specialisation should override this method, and at the
+    // very least finalise the action's command.
+    // Return true if dependencies were added.
     bool augmentAction() {
+        if (action) {
+            action.finaliseCommand([]);
+        }
         return false;
     }
 
@@ -1535,154 +1525,126 @@ class File : Node {
 }
 
 
-//
-// Obj - an object file built from a source file
-//
-final class Obj : File {
-    static Obj[File] bySource; // object files by the source file they are built from
-
-    this(ref Origin origin, File source) {
-
-        string name_ = setExtension(source.name, "o");
-        string path_ = prospectivePath("obj", source.parent, name_);
-
-        super(origin, source.parent, name_, Privacy.PUBLIC, path_, false, true);
-
-        errorUnless(source !in bySource, origin,
-                    "source file %s already used to build an object file", source);
-        bySource[source] = this;
-
-        string actionName;
-        string actionCommand;
-
-        switch (extension(source.name)) {
-        case ".cc":
-        case ".cpp":
-            actionName    = format("%-15s %s", "C++", path);
-            actionCommand = format("g++ -c %s -DTRACE_DOMAIN=\\\"%s\\\"",
-                                   getOption("C++FLAGS"), source.path);
-            foreach (dir; split(getOption("HEADERS"))) {
-                actionCommand ~= format(" -isystem %s", dir);
-            }
-            actionCommand ~= " -iquote src -iquote obj -iquote .";
-            actionCommand ~= format(" -o %s %s", path, source.path);
-            break;
-        case ".c":
-            actionName    = format("%-15s %s", "C", path);
-            actionCommand = format("gcc -c %s -DTRACE_DOMAIN=\\\"%s\\\"",
-                                   getOption("CCFLAGS"), source.path);
-            foreach (dir; split(getOption("HEADERS"))) {
-                actionCommand ~= format(" -isystem %s", dir);
-            }
-            actionCommand ~= " -iquote src -iquote obj -iquote .";
-            actionCommand ~= format(" -o %s %s", path, source.path);
-            break;
-        case ".d":
-            actionName    = format("%-15s %s", "D", path);
-            actionCommand = format("dmd -c %s", getOption("DFLAGS"));
-            foreach (dir; split(getOption("IMPORTS"))) {
-                actionCommand ~= format(" -I%s", dir);
-            }
-            actionCommand ~= " -Isrc -Iobj";
-            actionCommand ~= format(" -of%s %s", path, source.path);
-            break;
-        default:
-            error(origin, "Unsupported source file extension %s", extension(source.name));
-        }
-
-        action = new Action(origin, actionName, actionCommand, [this], [source]);
-        addReference(origin, source);
+// Free function to validate the compatibility of a source extension
+// given that sourceExt is already being used.
+string validateExtension(Origin origin, string newExt, string usingExt) {
+    string result = usingExt;
+    if (usingExt == null || usingExt == ".c") {
+        result = newExt;
     }
+    errorUnless(result == newExt || newExt == ".c", origin,
+                "Cannot use object file compiled from %s when already using %s",
+                newExt, usingExt);
+    return result;
 }
-
 
 //
 // Binary - a binary file incorporating object files and 'owning' source files.
+// Concrete implementations are StaticLib and Exe.
 //
 abstract class Binary : File {
     static Binary[File] byContent; // binaries by the header and body files they 'contain'
 
-    struct Source {
-        string  name;
-        Privacy privacy;
-    }
-
-    bool         isD;
     File[]       objs;
     File[]       headers;
     bool[SysLib] reqSysLibs;
     bool[Binary] reqBinaries;
-
+    string       sourceExt;  // The source extension object files are compiled from.
 
     // create a binary using files from this package.
-    // All the sources themselves may be already-known built files,
+    // The sources may be already-known built files or source files in the repo,
     // but can't already be used by another Binary.
-    this(ref Origin origin, Pkg pkg, string name_, string path_, string[] requires) {
+    this(ref Origin origin, Pkg pkg, string name_, string path_,
+         string[] publicSources, string[] protectedSources, string[] sysLibs) {
+
         super(origin, pkg, name_, Privacy.PUBLIC, path_, false, true);
 
         // required system libraries
-        foreach (req; requires) {
-            if (req !in SysLib.byName) {
-                new SysLib(req);
+        foreach (sys; sysLibs) {
+            if (sys !in SysLib.byName) {
+                new SysLib(sys);
             }
-            SysLib lib = SysLib.byName[req];
+            SysLib lib = SysLib.byName[sys];
             if (lib !in reqSysLibs) {
                 reqSysLibs[lib] = true;
             }
         }
-    }
 
-    // Add sources to this Binary. Adding them after construction allows generated source
-    // files to be children of the Binary.
-    void addMySources(ref Origin origin, Source[] sources) {
+        // Local function to add a source file to this Binary
+        void addSource(string name, Privacy privacy) {
 
-        bool isScannable(string extension) {
-            return
-                extension == ".c"  ||
-                extension == ".cc" ||
-                extension == ".h"  ||
-                extension == ".d";
-        }
+            // Create a File to represent the named source file.
+            string ext = extension(name);
+            File sourceFile = File.addSource(origin, this, name, privacy, isScannable(ext));
 
-        errorUnless(sources.length > 0, origin, "binary must have at least one source file");
-        foreach (source; sources) {
-            string ext = extension(source.name);
-            File sourceFile = File.addSource(origin, this, source.name, source.privacy, isScannable(ext));
+            errorUnless(sourceFile !in byContent, origin, "%s already used", sourceFile.path);
             byContent[sourceFile] = this;
 
-            if (ext == ".d" || ext == ".cc" || ext == ".c") {
-                // a source file that we generate an Obj from
-                objs ~= new Obj(origin, sourceFile);
+            // Look for a command to do something with the source file.
 
-                if (ext == ".d") {
-                    isD = true;
+            CompileCommand  *compile  = ext in compileCommands;
+            GenerateCommand *generate = ext in generateCommands;
+
+            if (compile) {
+                // Compile an object file from this source.
+
+                // Remember what source extension this binary uses.
+                sourceExt = validateExtension(origin, ext, sourceExt);
+
+                string destName = stripExtension(sourceFile.name) ~ ".o";
+                string destPath = prospectivePath("obj", sourceFile.parent, destName);
+                File obj = new File(origin, this, destName, Privacy.PUBLIC, destPath, false, true);
+                objs ~= obj;
+
+                errorUnless(obj !in byContent, origin, "%s already used", obj.path);
+                byContent[obj] = this;
+
+                string actionName = format("%-15s %s", "Compile", sourceFile.path);
+
+                obj.action = new Action(origin, actionName, compile.command, [obj], [sourceFile]);
+            }
+            else if (generate) {
+                // Generate more source files from sourceFile.
+
+                File[] files;
+                string suffixes;
+                foreach (suffix; generate.suffixes) {
+                    string destName = stripExtension(name) ~ suffix;
+                    string destPath = buildPath("obj", parent.trail, destName);
+                    File gen = new File(origin, this, destName, privacy, destPath,
+                                        isScannable(suffix), true);
+                    files    ~= gen;
+                    suffixes ~= suffix ~ " ";
+                }
+                Action action = new Action(origin,
+                                           format("%-15s %s", ext ~ "->" ~ suffixes, sourceFile.path),
+                                           generate.command,
+                                           files,
+                                           [sourceFile]);
+                foreach (gen; files) {
+                    gen.action = action;
+                }
+
+                // And add them as sources too.
+                foreach (gen; files) {
+                    addSource(gen.name, privacy);
                 }
             }
-            else if (ext == ".ipc") {
-                // an inter-process-communication file from which we generate a header file
-
-                // make sure the ipc-compiler has already been defined
-                string compilerPath = buildPath("dist", "bin", "ipc-compiler");
-                File* compiler = compilerPath in File.byPath;
-                errorUnless(compiler !is null,
-                            origin,
-                            "Cannot cook an ipc files before creating the compiler (%s)",
-                            compilerPath);
-
-                // build a header file from this ipc file
-                string destPath = buildPath("obj", parent.trail, stripExtension(source.name) ~ ".h");
-                File dest = new File(origin, this, baseName(destPath), source.privacy, destPath, true, true);
-                dest.action = new Action(origin,
-                                         format("%-15s %s", "cook-ipc", sourceFile.path),
-                                         format("ipc-compiler %s %s", sourceFile.path, dest.path),
-                                         [dest],
-                                         [sourceFile, *compiler]);
-                byContent[dest] = this;
-                headers ~= dest;
-            }
             else {
+                // No compile or generate commands - assume it is a header file.
                 headers ~= sourceFile;
             }
+        }
+
+        errorUnless(publicSources.length + protectedSources.length > 0,
+                    origin,
+                    "binary must have at least one source file");
+
+        foreach (source; publicSources) {
+            addSource(source, Privacy.PUBLIC);
+        }
+        foreach (source; protectedSources) {
+            addSource(source, Privacy.SEMI_PROTECTED);
         }
     }
 
@@ -1719,35 +1681,24 @@ final class StaticLib : Binary {
 
     string uniqueName;
 
-    this(ref Origin origin, Pkg pkg, string name_, string[] requires) {
+    this(ref Origin origin, Pkg pkg, string name_,
+         string[] publicSources, string[] protectedSources, string[] sysLibs) {
+
+        // Decide on a name and path for the library.
         uniqueName = std.array.replace(buildPath(pkg.trail, name_), dirSeparator, "-") ~ "-s";
         if (name_ == pkg.name) uniqueName = std.array.replace(pkg.trail, dirSeparator, "-") ~ "-s";
         string _path = buildPath("obj", format("lib%s.a", uniqueName));
-        super(origin, pkg, name_, _path, requires);
-    }
 
-    void addSources(ref Origin origin, string[] publicSources, string[] protectedSources) {
-        Source[] sources;
-        foreach (name; protectedSources) {
-            sources ~= Source(name, Privacy.SEMI_PROTECTED);
-        }
-        foreach (name; publicSources) {
-            sources ~= Source(name, Privacy.PUBLIC);
-        }
-        addMySources(origin, sources);
+        // Super-constructor takes care of compiling to object files and
+        // finding out what libraries are needed.
+        super(origin, pkg, name_, _path, publicSources, protectedSources, sysLibs);
 
-        // action
-        string command;
-        if (objs.length) {
-            command = format("rm -f %s; ar csr %s", path, path);
-            foreach (obj; objs) {
-                command ~= format(" %s", obj.path);
-            }
-        }
-        else {
-            command = format("rm -f %s; echo dummy > %s", path, path);
-        }
-        action = new Action(origin, format("%-15s %s", "StaticLib", path), command, [this], objs ~ headers);
+        // Decide on an action.
+        LinkCommand *linkCommand = sourceExt in linkCommands;
+        errorUnless(linkCommand && linkCommand.staticLib.length, origin,
+                    "No link command for static lib from %s", sourceExt);
+        action = new Action(origin, format("%-15s %s", "StaticLib", path),
+                            linkCommand.staticLib, [this], objs);
     }
 }
 
@@ -1770,14 +1721,14 @@ final class DynamicLib : File {
     string uniqueName;
 
     StaticLib[] staticLibs;
+    string      sourceExt;
 
-    this(ref Origin origin_, Pkg pkg, string name_, string[] staticTrails, bool isPlugin) {
+    this(ref Origin origin_, Pkg pkg, string name_, string[] staticTrails) {
         origin = origin_;
 
         uniqueName = std.array.replace(buildPath(pkg.trail, name_), "/", "-");
         if (name_ == pkg.name) uniqueName = std.array.replace(pkg.trail, dirSeparator, "-");
         string _path = buildPath("dist", "lib", format("lib%s.so", uniqueName));
-        if (isPlugin) _path = buildPath("dist", "lib", "plugins", format("lib%s.so", uniqueName));
 
         super(origin, pkg, name_ ~ "-dynamic", Privacy.PUBLIC, _path, false, true);
 
@@ -1800,22 +1751,23 @@ final class DynamicLib : File {
             addReference(origin, *staticLib);
             staticLibs ~= *staticLib;
             byContent[*staticLib] = this;
+
+            sourceExt = validateExtension(origin, staticLib.sourceExt, sourceExt);
         }
         errorUnless(staticLibs.length > 0, origin, "dynamic-lib must have at least one static-lib");
 
         // action
-        bool[SysLib] gotSysLibs;
         string actionName = format("%-15s %s", "DynamicLib", path);
-        string command = format("g++ -shared %s -o %s", getOption("LINKFLAGS"), path);
-        File[] depLibs;
+        LinkCommand *linkCommand = sourceExt in linkCommands;
+        errorUnless(linkCommand !is null && linkCommand.dynamicLib != null, origin,
+                    "No link command for %s -> .dlib", sourceExt);
+        File[] objs;
         foreach (staticLib; staticLibs) {
-            depLibs ~= staticLib;
             foreach (obj; staticLib.objs) {
-                command ~= format(" %s", obj.path);
+                objs ~= obj;
             }
         }
-
-        action = new Action(origin, actionName, command, [cast(File)this], depLibs);
+        action = new Action(origin, actionName, linkCommand.dynamicLib, [this], objs);
     }
 
 
@@ -1833,6 +1785,7 @@ final class DynamicLib : File {
         bool            added;
 
         //say("augmenting action for DynamicLib %s", name);
+
         void accumulate(StaticLib lib) {
             //say("  accumulating %s", lib.name);
             foreach (other; lib.reqBinaries.keys) {
@@ -1852,25 +1805,23 @@ final class DynamicLib : File {
                             name, lib.trail, lib.path);
                 foreach (sys; lib.reqSysLibs.keys) {
                     if (sys !in gotSysLibs) {
-                        //say("  new required SysLib %s", sys.name);
                         gotSysLibs[sys] = true;
                         sysLibs ~= sys;
-                        added = true;
                     }
                 }
             }
         }
+
         foreach (lib; staticLibs) {
             accumulate(lib);
         }
 
-        string augmentation;
+        string[] libs;
         foreach (sys; sysLibs) {
-            augmentation ~= format(" -l%s", sys.name);
+            libs ~= sys.name;
         }
-        //say("augmentation is %s", augmentation);
-        action.augment(augmentation);
-        return added;
+        action.finaliseCommand(libs);
+        return false;
     }
 }
 
@@ -1880,79 +1831,41 @@ final class DynamicLib : File {
 //
 final class Exe : Binary {
 
-    bool   augmented;
-    string desc;
-    string src;
-    string dest;
+    bool augmented;
 
     // create an executable using files from this package, linking to libraries
     // that contain any included header files, and any required system libraries.
     // Note that any system libraries required by inferred local libraries are
     // automatically linked to.
-    this(ref Origin origin, Pkg pkg, string kind, string name_, string[] requires) {
+    this(ref Origin origin, Pkg pkg, string kind, string name_,
+         string[] sourceNames, string[] sysLibs) {
         // interpret kind
+        string dest, desc;
         switch (kind) {
-            case "dist-util": desc = "DistUtil"; src = "util";  dest = buildPath("dist", "bin", name_);     break;
-            case "priv-util": desc = "PrivUtil"; src = "util";  dest = buildPath("priv", pkg.trail, name_); break;
-            case "test-util": desc = "TestExe";  src = "test";  dest = buildPath("priv", pkg.trail, name_); break;
+            case "dist-exe": desc = "DistExe"; dest = buildPath("dist", "bin", name_);     break;
+            case "priv-exe": desc = "PrivExe"; dest = buildPath("priv", pkg.trail, name_); break;
+            case "test-exe": desc = "TestExe"; dest = buildPath("priv", pkg.trail, name_); break;
             default: assert(0, "invalid Exe kind " ~ kind);
         }
 
-        super(origin, pkg, name_ ~ "-exe", dest, requires);
+        super(origin, pkg, name_ ~ "-exe", dest, sourceNames, [], sysLibs);
 
-        if (kind == "test-util") {
+        LinkCommand *linkCommand = sourceExt in linkCommands;
+        errorUnless(linkCommand && linkCommand.executable != null, origin,
+                    "No command to link and executable from sources of extension %s", sourceExt);
+
+        action = new Action(origin, format("%-15s %s", desc, dest), linkCommand.executable, [this], objs);
+
+        if (kind == "test-exe") {
             File test   = new File(origin, pkg, name ~ "-result",
                                    Privacy.PRIVATE, dest ~ "-passed", false, true);
             test.action = new Action(origin,
                                      format("%-15s %s", "TestResult", test.path),
-                                     format("./test %s", dest),
+                                     format("TEST %s", dest),
                                      [test],
                                      [this]);
         }
     }
-
-
-    void addSources(ref Origin origin, string[] sources) {
-        errorUnless(sources.length > 0, origin, "An exe must have at least one source file");
-        Source[] _sources;
-        foreach (source; sources) {
-            _sources ~= Source(buildPath(src, source), Privacy.PROTECTED);
-        }
-        addMySources(origin, _sources);
-
-        // exe action
-        string command;
-        string ext = extension(sources[0]);
-        switch (ext) {
-        case ".cc":
-        case ".c":
-            command = format("%s %s -o %s",
-                             ext == "c" ? "gcc" : "g++",
-                             getOption("LINKFLAGS"), dest);
-            foreach (dir; split(getOption("HEADERS"))) {
-                command ~= format(" -isystem %s", dir);
-            }
-            foreach (obj; objs) {
-                command ~= format(" %s", obj.path);
-            }
-            command ~= format(" -L%s", buildPath("dist", "lib"));
-            command ~= format(" -L%s", buildPath("dist", "lib", "plugins"));
-            command ~= format(" -Lobj");
-            break;
-        case ".d":
-            command = format("dmd %s -of%s ", getOption("DLINKFLAGS"), path);
-            foreach (obj; objs) {
-                command ~= format(" %s", obj.path);
-            }
-            command ~= format(" -L-Lobj");
-            break;
-        default:
-            error(origin, "Unsupported source file extension %s in %s", extension(sources[0]), path);
-        }
-
-        action = new Action(origin, format("%-15s %s", desc, dest), command, [this], objs ~ headers);
-    }
-
 
     // Called just before our action is issued - augment the action's command string
     // with the library dependencies that we should now know about via includeAdded().
@@ -1974,7 +1887,7 @@ final class Exe : Binary {
             }
         }
 
-        // binaries we require, with most fundamental first
+        // binaries we require
         bool[DynamicLib] gotDynamicLibs;
         bool[StaticLib]  gotStaticLibs;
         bool[SysLib]     gotSysLibs;
@@ -2033,6 +1946,7 @@ final class Exe : Binary {
                         // use the static lib
                         //say("    using static-lib %s", lib.uniqueName);
                         action.addDependency(lib);
+                        added = true;
                         if (lib.objs.length) {
                             // this static lib is not a dummy - use it
                             localLibs ~= Needed(lib.number, lib.uniqueName);
@@ -2041,22 +1955,21 @@ final class Exe : Binary {
                 }
             }
         }
+
         //say("accumulating required libraries for exe %s", path);
         accumulate(this);
 
         string extra;
-        if (isD) extra = "-L";
 
-        string augmentation;
+        string[] libs;
         foreach (needed; localLibs.sort) {
-            augmentation ~= format(" %s-l%s", extra, needed.name);
+            libs ~= needed.name;
         }
         foreach (needed; sysLibs.sort) {
-            augmentation ~= format(" %s-l%s", extra, needed.name);
+            libs ~= needed.name;
         }
-        //say("%s augmentation is '%s'", this, augmentation);
 
-        action.augment(augmentation);
+        action.finaliseCommand(libs);
         return added;
     }
 }
@@ -2113,7 +2026,6 @@ void processBobfile(string indent, Pkg pkg) {
         if (g_print_rules) say("%s%s", indent, statement.toString);
         switch (statement.rule) {
 
-            // packages
             case "contain":
                 foreach (name; statement.targets) {
                     errorUnless(dirName(name) == ".", statement.origin,
@@ -2144,248 +2056,48 @@ void processBobfile(string indent, Pkg pkg) {
                 }
             break;
 
-            // libraries
             case "static-lib":
             {
                 errorUnless(statement.targets.length == 1, statement.origin,
-                            "Can only have one static-lib name per rule");
-                StaticLib lib = new StaticLib(statement.origin, pkg, statement.targets[0], statement.arg3);
-                lib.addSources(statement.origin, statement.arg1, statement.arg2);
+                            "Can only have one static-lib name per statement");
+                StaticLib lib = new StaticLib(statement.origin,
+                                              pkg,
+                                              statement.targets[0],
+                                              statement.arg1,
+                                              statement.arg2,
+                                              statement.arg3);
             }
             break;
 
             case "dynamic-lib":
             {
                 errorUnless(statement.targets.length == 1, statement.origin,
-                            "Can only have one dynamic-lib name per rule");
-                new DynamicLib(statement.origin, pkg, statement.targets[0], statement.arg1,
-                               statement.arg2.length == 1 && statement.arg2[0] == "plugin");
+                            "Can only have one dynamic-lib name per statement");
+                new DynamicLib(statement.origin,
+                               pkg,
+                               statement.targets[0],
+                               statement.arg1);
             }
             break;
 
-            case "dist-util":
-            case "priv-util":
-            case "test-util":
+            case "dist-exe":
+            case "priv-exe":
+            case "test-exe":
             {
                 errorUnless(statement.targets.length == 1,
                             statement.origin,
-                            "Can only have one util/exe name per rule");
-                Exe exe = new Exe(statement.origin, pkg, statement.rule, statement.targets[0], statement.arg2);
-                exe.addSources(statement.origin, statement.arg1);
-            }
-            break;
-
-            case "tao-lib":
-            {
-                //
-                // tao-lib  lib-name : idl-sources;    # idl files and gen src in package dir
-                //
-                errorUnless(statement.targets.length == 1, statement.origin,
-                            "Can only have one tao static-lib name per rule");
-
-
-                //
-                // create the static-lib
-                //
-
-                auto requires = [
-                    "TAO_CosNaming",
-                    "TAO_PortableServer",
-                    "TAO_DynamicAny",
-                    "TAO",
-                    "ACE",
-                    "rt",
-                    "dl"];
-                auto lib = new StaticLib(statement.origin, pkg, statement.targets[0], requires);
-
-                //
-                // create the idl files and the source files generated from them
-                //
-
-                string[] publicNames;
-                string[] protectedNames;
-                foreach (idlName; statement.arg1) {
-
-                    // idl file
-                    File idl = File.addSource(statement.origin, pkg, idlName, Privacy.PROTECTED, false);
-
-                    // paths of all generated files
-                    string base = buildPath("obj", pkg.trail, stripExtension(idlName));
-                    string[] junk = [
-                        base ~ "S_T.cc"];
-                    string[] publicPaths = [
-                        base ~ "C.h",
-                        base ~ "S.h" ];
-                    string[] protectedPaths = [
-                        base ~ "S_T.inl",
-                        base ~ "C.inl",
-                        base ~ "S.inl",
-                        base ~ "S_T.h",
-                        base ~ "C.cc",
-                        base ~ "S.cc" ];
-
-                    // generated files
-                    File[] files;
-                    foreach (path; junk) {
-                        files ~= new File(statement.origin, lib, baseName(path),
-                                          Privacy.PRIVATE, path, false, true);
-                    }
-                    foreach (path; publicPaths) {
-                        files ~= new File(statement.origin, lib, baseName(path),
-                                          Privacy.PUBLIC, path, !(extension(path) == ".inl"), true);
-                        publicNames ~= baseName(path);
-                    }
-                    foreach (path; protectedPaths) {
-                        files ~= new File(statement.origin, lib, baseName(path),
-                                          Privacy.PROTECTED, path, !(extension(path) == ".inl"), true);
-                        protectedNames ~= baseName(path);
-                    }
-
-                    // action to generate the files and edit them to be correct
-                    string command = format("%s -in -Ce -cs C.cc -ss S.cc -sT S_T.cc", getOption("TAO_IDL"));
-                    if (toLower(getOption("GENERATE_EMPTY_SERVANT")) == "true") {
-                        command ~= " -GI -GIh \"_impl-rename.h\" -GIs \"_impl-rename.cc\" -GIe \"Impl\" -GIc -GIa";
-                    }
-                    foreach (d; split(getOption("IDL_HEADERS"))) {
-                        command ~= format(" -I%s", d);
-                    }
-                    command ~= format(" -I%s", dirName(idl.path));
-                    command ~= format(" -I%s", dirName(base));
-                    command ~= " -o " ~ buildPath("obj", pkg.trail) ~ " " ~ idl.path ~ " &&";
-                    command ~=
-                        ` sed --in-place --separate` ~
-                        ` -e '/#include/s/\"orbsvcs\/\([^\"]*\)\"/\<orbsvcs\/\1\>/'` ~
-                        ` -e '/#include/s/\"tao\/\([^\"]*\)\"/\<tao\/\1\>/'` ~
-                        ` -e '/#include/s/\"ace\/\([^\"]*\)\"/\<ace\/\1\>/'` ~
-                        ` -e '/#include \"/s|#include \"|#include \"` ~ pkg.trail ~ `/|'` ~ // XXX should not do this if included path contains a slash
-                        ` -e '/#include .*.cc/d'` ~
-                        ` -e 's/[[:space:]]\+$//'`;
-                    foreach (file; files) {
-                        command ~= " " ~ file.path;
-                    }
-                    auto action = new Action(statement.origin, format("%-15s %s", statement.rule, idl.path),
-                                             command, files, [idl]);
-
-                    foreach (file; files) {
-                        file.action = action;
-                    }
-                }
-
-                // add the generated source files as the sources of the library, completing its definition
-                lib.addSources(statement.origin, publicNames, protectedNames);
-            }
-            break;
-
-            case "dist-data":
-            case "test-data":
-            case "util-data":
-            case "doc-data":
-            {
-                void dataRule(ref Origin origin, Pkg pkg, string kind, string extra) {
-                    string fromPath;
-                    string destPath;
-                    if (kind == "doc-data") {
-                        fromPath = buildPath("src",  pkg.trail, "doc", extra);
-                        destPath = buildPath("priv", pkg.trail, "doc", extra);
-                    }
-                    else if (kind == "test-data") {
-                        fromPath = buildPath("src",  pkg.trail, "test", extra);
-                        destPath = buildPath("priv", pkg.trail,         extra);
-                    }
-                    else if (kind == "util-data") {
-                        fromPath = buildPath("src",  pkg.trail, "util", extra);
-                        destPath = buildPath("priv", pkg.trail,         extra);
-                    }
-                    else if (kind == "dist-data") {
-                        fromPath = buildPath("src",  pkg.trail, "data", extra);
-                        destPath = buildPath("dist",            "data", extra);
-                    }
-
-                    if (isDir(fromPath)) {
-                        // recurse into directory
-                        foreach (string path; dirEntries(fromPath, SpanMode.shallow)) {
-                            dataRule(origin, pkg, kind, buildPath(extra, path.baseName));
-                        }
-                    }
-                    else {
-                        // set up from and dest files, and an action to create the dest.
-                        string name = std.array.replace(extra, dirSeparator, "-");
-                        File from   = new File(origin, pkg, name ~ "-src",  Privacy.PUBLIC, fromPath, false, false);
-                        File dest   = new File(origin, pkg, name ~ "-dest", Privacy.PUBLIC, destPath, false, true);
-                        dest.action = new Action(origin,
-                                                 format("%-15s %s", "Data", dest.path),
-                                                 format("cp %s %s", from.path, dest.path),
-                                                 [dest],
-                                                 [from]);
-                    }
-                }
-
-                foreach (name; statement.targets) {
-                    dataRule(statement.origin, pkg, statement.rule, name);
-                }
-            }
-            break;
-
-            case "doc":
-            {
-                foreach (name; statement.targets) {
-                    string fromPath = buildPath("src",  pkg.trail, "doc", name ~ ".rst");
-                    string destPath = buildPath("priv", pkg.trail, "doc", name ~ ".html");
-
-                    errorUnless(exists(fromPath) && !isDir(fromPath), statement.origin,
-                                "%s not found", fromPath);
-
-                    File from   = new File(statement.origin, pkg, name ~ "-rst",
-                                           Privacy.PUBLIC, fromPath, false, false);
-
-                    File dest   = new File(statement.origin, pkg, name ~ "-html",
-                                           Privacy.PUBLIC, destPath, false, true);
-
-                    dest.action = new Action(statement.origin,
-                                             format("%-15s %s", "Doc", dest.path),
-                                             format("%s --exit-status=2 %s %s",
-                                                    getOption("RST2HTML"), from.path, dest.path),
-                                             [dest],
-                                             [from]);
-                }
-            }
-            break;
-
-            case "dist-shell":
-            case "priv-shell":
-            {
-                foreach (name; statement.targets) {
-
-                    string fromPath = buildPath("src",  pkg.trail, "util", name);
-                    string destPath;
-                    if (statement.rule == "dist-shell") {
-                        destPath = buildPath("dist", "bin", name);
-                    }
-                    else {
-                        destPath = buildPath("priv", pkg.trail, name);
-                    }
-
-                    errorUnless(exists(fromPath) && !isDir(fromPath), statement.origin,
-                                "%s not found", fromPath);
-
-                    File from   = new File(statement.origin, pkg, name ~ "-sh",
-                                           Privacy.PUBLIC, fromPath, false, false);
-
-                    File dest   = new File(statement.origin, pkg, name,
-                                           Privacy.PUBLIC, destPath, false, true);
-
-                    dest.action = new Action(statement.origin,
-                                             format("%-15s %s", "Shell", dest.path),
-                                             format("cp -f %s %s && chmod +x %s",
-                                                    from.path, dest.path, dest.path),
-                                             [dest],
-                                             [from]);
-                }
+                            "Can only have one exe name per statement");
+                Exe exe = new Exe(statement.origin,
+                                  pkg,
+                                  statement.rule,
+                                  statement.targets[0],
+                                  statement.arg1,
+                                  statement.arg2);
             }
             break;
 
         default:
-            error(statement.origin, "Unsupported rule '%s'", statement.rule);
+            error(statement.origin, "Unsupported statement '%s'", statement.rule);
         }
     }
 }
@@ -2437,7 +2149,7 @@ void cleandirs() {
 //
 // Planner function
 //
-bool doPlanning(int numJobs, bool printRules, bool printDeps, bool printDetails) {
+bool doPlanning(int numJobs, bool printStatements, bool printDeps, bool printDetails) {
 
     // state variables
     size_t       inflight;
@@ -2446,9 +2158,17 @@ bool doPlanning(int numJobs, bool printRules, bool printDeps, bool printDetails)
     bool         exiting;
     bool         success = true;
 
+    // Spawn the bailer.
+    bailerTid = spawn(&doBailer);
+
     // receive registration message from each worker and remember its name
     while (workers.length < numJobs) {
         receive( (string worker) { workers[worker] = true; idlers[worker] = true; } );
+    }
+
+    // Ensure tmp exists so the workers have a sandbox.
+    if (!exists("tmp")) {
+        mkdir("tmp");
     }
 
     // local function: an action has completed successfully - update all files built by it
@@ -2474,11 +2194,12 @@ bool doPlanning(int numJobs, bool printRules, bool printDeps, bool printDetails)
 
     // set up some globals
     readOptions;
-    g_print_rules   = printRules;
+    g_print_rules   = printStatements;
     g_print_deps    = printDeps;
     g_print_details = printDetails;
 
-    string projectPackage = getOption("PROJECT-PACKAGE");
+    string projectPackage = getOption("PROJECT");
+    errorUnless(projectPackage.length > 0, Origin(), "No project directory specified");
 
     int needed;
     try {
@@ -2539,11 +2260,15 @@ bool doPlanning(int numJobs, bool printRules, bool printDeps, bool printDetails)
         }
         foreach (toiler; toilers) idlers.remove(toiler);
 
-        // receive a completion or failure
+        // Receive a completion or failure.
         receive( (string worker, string action) { actionCompleted(worker, action); },
                  (string worker)                { workerTerminated(worker); } );
     }
 
+    // Shut down the bailer.
+    send(bailerTid, "goodnight");
+
+    // Print some statistics.
     if (!File.outstanding.length && success) {
         say("\n"
             "Total number of files:             %s\n"
@@ -2572,7 +2297,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         say("%s", action);
 
         success = false;
-        string results = buildPath(".bob", myName);
+        string results = buildPath("tmp", myName);
 
         // launch child process to do the action
         string str = command ~ " 2>" ~ results;
@@ -2612,14 +2337,14 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
                 }
             }
 
-            // print error message
             if (!bailed) {
+                // Print error message
                 say("\n%s", readText(results));
                 say("%s: FAILED\n%s", action, command);
-                fatal("Aborting build due to action failure");
+                say("Aborting build due to action failure");
             }
             else {
-                // just quietly throw
+                // Someone else bailed already, so just quietly throw
                 throw new BailException();
             }
         }
@@ -2659,25 +2384,25 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
 
 int main(string[] args) {
     try {
-        bool printRules   = false;
-        bool printDeps    = false;
-        bool printDetails = false;
-        bool printActions = false;
-        bool help         = false;
-        uint numJobs      = 1;
+        bool printStatements = false;
+        bool printDeps       = false;
+        bool printDetails    = false;
+        bool printActions    = false;
+        bool help            = false;
+        uint numJobs         = 1;
 
         int returnValue = 0;
         try {
             getopt(args,
                    std.getopt.config.caseSensitive,
-                   "rules",        &printRules,
-                   "deps",         &printDeps,
-                   "details",      &printDetails,
-                   "actions",      &printActions,
+                   "statements|s", &printStatements,
+                   "deps|d",       &printDeps,
+                   "details|v",    &printDetails,
+                   "actions|a",    &printActions,
                    "jobs|j",       &numJobs,
-                   "help",         &help);
+                   "help|h",       &help);
         }
-        catch (std.conv.ConvError ex) {
+        catch (std.conv.ConvException ex) {
             returnValue = 2;
             say(ex.msg);
         }
@@ -2699,7 +2424,7 @@ int main(string[] args) {
         }
         if (returnValue != 0 || help) {
             say("Usage:  bob [options]\n"
-                "  --rules          print rules\n"
+                "  --statements     print statements\n"
                 "  --deps           print dependencies\n"
                 "  --actions        print actions\n"
                 "  --details        print heaps of details\n"
@@ -2714,7 +2439,6 @@ int main(string[] args) {
             printDeps = true;
         }
 
-
         // spawn the workers
         foreach (uint i; 0..numJobs) {
             //say("spawning worker %s", i);
@@ -2722,7 +2446,7 @@ int main(string[] args) {
         }
 
         // build everything
-        returnValue = doPlanning(numJobs, printRules, printDeps, printDetails) ? 0 : 1;
+        returnValue = doPlanning(numJobs, printStatements, printDeps, printDetails) ? 0 : 1;
 
         return returnValue;
     }

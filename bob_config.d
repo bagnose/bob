@@ -45,6 +45,9 @@ import core.stdc.stdlib;
 import core.sys.posix.sys.stat;
 
 
+// TODO only set up src links for top-level packages transitively mentioned
+//      in refer statements in project Bobfile.
+
 //================================================================
 // Helpers
 //================================================================
@@ -63,7 +66,7 @@ enum AppendType { notExist, mustExist, mayExist}
 
 //
 // Append some tokens to the named element in vars,
-// appending only if not already present and preserving order.
+// optionally not appending if already present, and preserving order.
 //
 private void append(ref Vars vars, string name, string[] extra, AppendType appendType) {
     final switch (appendType) {
@@ -81,17 +84,19 @@ private void append(ref Vars vars, string name, string[] extra, AppendType appen
     }
     foreach (string item; extra) {
         bool got = false;
-        foreach (string have; vars[name]) {
-            if (item == have) {
-                got = true;
-                break;
+        if (appendType != AppendType.notExist) {
+            foreach (string have; vars[name]) {
+                if (item == have) {
+                    got = true;
+                    break;
+                }
             }
         }
         if (!got) {
             vars[name] ~= item;
         }
     }
-    writefln("%s = %s", name, vars[name]);
+    //writefln("%s = %s", name, vars[name]);
 }
 
 
@@ -164,17 +169,19 @@ void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
     string bobText;
     foreach (string var; vars.keys().sort) {
         const string[] tokens = vars[var];
-        bobText ~= var ~ " =";
-        foreach (token; tokens) {
-            bobText ~= " " ~ token;
+        if (tokens.length) {
+            bobText ~= var ~ " =";
+            foreach (token; tokens) {
+                bobText ~= " " ~ token;
+            }
+            bobText ~= '\n';
         }
-        bobText ~= '\n';
     }
     update(buildPath(buildDir, "Boboptions"), bobText, false);
 
 
     // Create clean script.
-    update(buildPath(buildDir, "clean"), "rm -rf ./dist ./priv ./obj ./tmp", true);
+    update(buildPath(buildDir, "clean"), "rm -rf ./dist ./priv ./obj ./tmp\n", true);
 
 
     // Create environment file.
@@ -219,11 +226,11 @@ void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
     }
     foreach (string repoPath; repoPaths) {
         if (isDir(repoPath)) {
-            writefln("Adding source links for packages in %s.", repoPath);
+            //writefln("Adding source links for packages in %s.", repoPath);
             foreach (string path; dirEntries(repoPath, SpanMode.shallow)) {
                 string pkgName = baseName(path);
                 if (isDir(path) && pkgName[0] != '.') {
-                    writefln("  Found top-level package %s.", pkgName);
+                    //writefln("  Found top-level package %s.", pkgName);
                     assert(pkgName !in pkgPaths,
                            format("Package %s found at %s and %s",
                                   pkgName, pkgPaths[pkgName], path));
@@ -251,6 +258,7 @@ Vars parseConfig(string configFile, string mode) {
 
     Section section = Section.none;
     bool    inMode;
+    bool    foundMode;
     string  commandType;
     Vars    vars;
 
@@ -260,12 +268,12 @@ Vars parseConfig(string configFile, string mode) {
         // Skip comment lines.
         if (!line.length || line[0] == '#') continue;
 
-        writefln("processing line: %s", line);
+        //writefln("Processing line: %s", line);
 
         if (line.length && line[0] == '[' && line[$-1] == ']') {
             // Start of a section
             section = to!Section(line[1..$-1]);
-            writefln("Entered section %s", to!string(section));
+            //writefln("Entered section %s", to!string(section));
         }
 
         else {
@@ -286,7 +294,8 @@ Vars parseConfig(string configFile, string mode) {
                     // We are in a mode, which might be the one we want.
                     inMode = strip(line) == mode;
                     if (inMode) {
-                        writefln("Found mode %s", mode);
+                        foundMode = true;
+                        //writefln("Found mode %s", mode);
                     }
                 }
                 else if (inMode) {
@@ -298,6 +307,11 @@ Vars parseConfig(string configFile, string mode) {
                 }
             }
         }
+    }
+
+    if (!foundMode) {
+        writefln("Could not find mode %s in config file", mode);
+        exit(1);
     }
 
     return vars;

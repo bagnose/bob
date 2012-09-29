@@ -1,0 +1,254 @@
+Identification
+==============
+
+Bob is a build tool intended primarily to facilitate the development of
+large C/C++/D projects by:
+* Being easy to use.
+* Enforcing rules like dependency management.
+* Supporting code generation.
+
+This file provides an introduction into how to use bob. Refer to the example
+directory for more digestible help.
+
+
+Preparation
+===========
+
+Bob assumes that all the source code and external libraries/utilities you will
+need are already present. It is up to you to make this happen.
+
+Typically you will have:
+* Source code in one or more repository clones or checkouts.
+* A number of required third-party packages installed in the system.
+* A number of required third-party packages or in-house packages installed
+  in non-standard locations.
+
+
+Configuration
+=============
+
+The bob-config utility establishes a build directory, from which bob can build
+your project. bob-config requires a configuration file that defines a number of
+variables - see example/bob.cfg for a fully documented example.
+
+The build directory you specify must be outside the source-code repositories,
+avoiding pollution of your repositories with build artifacts, and allowing
+multiple build directories to be using the same source checkout. For example,
+your repository might be in ~/source/myproject, and you might have build
+directories ~/builds/myproject/debug, ~/builds/myproject/profile,
+~/builds/myproject/release.
+
+The build directory has links back to the subdirectories of the:
+* Directory that bob-config was run from, and
+* Directories listed in the REPOS variable in the bob config file.
+
+A typical repoitory directory structure is:
+
+repo-root
+  assorted-uninteresting-files
+  assorted-uninteresting-dirs
+  source-root
+    bob.cfg
+    assorted-source-dirs
+
+One of the source-dirs is specified in the PROJECT variable as containing
+the top level Bobfile.
+
+To configure a build directory from a repo that looks like the above:
+
+cd repo-root/source-root
+bob-config --config=bob.cfg --mode=debug ~/builds/myproject/debug
+
+
+The build directory contains:
+
+environment - Sourced to set up environment variables.
+run         - Script to run a project executable.
+Boboptions  - Contains variables from config file.
+src
+  symlinks-to-source-dirs
+obj
+  dirs-matching-source-dir-tree
+    intermediate-build-artifacts
+priv
+  dirs-matching-source-dir-tree
+    private-finished-build-artifacts
+dist
+  lib       - Contains dynamic libraries.
+  bin       - Contains executables and scripts.
+  data      - Contains data files.
+
+
+Building
+========
+
+Bob is the build tool. It always builds the whole project, so there is no build
+target to specify on the command-line. This isn't a problem because:
+* Bob determines what needs to be done quickly.
+* Bob's log output is very clean. 
+* Bob builds files (mostly) in definition order, and stops the build when an error
+  occurs, so you quickly get back to the point of failure when getting code past
+  the compiler.
+* Bob runs and evaluates unit tests (mostly) in definition order, so if you have
+  unit tests, you quickly get to the point of failure during debugging.
+
+The "mostly" above refers to the jitter in build order that occurs when building
+with multiple processes.
+
+The build process is controlled by Bobfiles. The top-level source directory
+(specified in the config file) contains the top-level Bobfile, and it brings in
+other directories with its statements.
+
+Refer to the example's Bobfiles.
+
+Bobfile syntax is:
+
+# This line is a comment.
+<statement-type> <param0> [: <param1> [: param2 [: param3]]]; 
+
+where a parameter is a space-separated list of tokens.
+
+Statements often refer to files and directories.
+Files are always in the same directory as the Bobfile.
+Directories are either a subdirectory of the directory containing
+the Bobfile, or relative to the build directory's src subdirectory,
+depending on the statement.
+
+Statement types are:
+
+Contain
+-------
+
+contain subdir-names [: protected];
+
+eg: contain math net stream tools;
+
+Specifies that the listed subdirectories contain Bobfiles and are included in
+the build. Visibility defaults to public. Contained directories must be
+specified in dependency order.
+
+
+Refer
+-----
+
+refer paths-from-source-root;
+
+eg: refer math tools/analysis;
+
+Specifies that this directory has access to the listed directories.
+
+
+Static Lib
+----------
+
+static-lib lib-name : public-source [: protected-source [: required-system-libs]];
+
+eg: static-lib math : matrix.h alg.h : matrix.cc alg.cc : m;
+
+Specifes a static library. All the source files should be in the same language,
+or in a language from which the library's language files can be generated.
+
+The public files are those that client code needs to import/include.
+
+
+Dynamic Lib
+-----------
+
+dynamic-lib name : static-libs;
+
+eg: dynamic-lib tools : tools;
+
+Dynamic libs contain all the object files contained in the specified static libs.
+Executables defined after a dynamic library will link to the dynamic library
+rather than the static library.
+
+The contained static-libs all have to be declared in the current Bobfile
+or in a transitively contained directoy's Bobfile.
+The last element can optionally be omitted if it is the same as the
+containing directory name, which is usually the case.
+
+
+Executable
+----------
+
+dist-exe exe-name : source : required-system-libs;
+test-exe exe-name : source : required-system-libs;
+util-exe exe-name : source : required-system-libs;
+
+eg: test-exe math-test : math_test.cpp;
+
+
+dist-exe places the built executable in the dist/bin directory.
+
+util-exe places the build executable in the priv/<path> directory.
+
+test-exe places the built executable in the priv/<path> directory,
+and executes the test when its result file is out of date.
+
+The test is run with the TEST_PATH environment variable set to a path
+that the test can use for scratch file I/O if necessary.
+
+
+Script
+------
+
+priv-script name;
+dist-script name;
+
+Copies the named file(s) into the build directory's dist/bin or priv/<path>
+directory and makes it executable.
+
+
+Data
+----
+
+priv-data name;
+dist-data name;
+
+Copies the named file(s) and subdirectory(s) into the build directory's
+dist/bin or priv/<path> directory.
+
+
+Documentation
+-------------
+
+doc names;
+
+Generates documentation from the named files and places it into priv/<path>.
+
+
+Dependencies
+============
+
+Discussion
+----------
+
+A major preoccupation of bob is with dependencies. This is because on large
+projects, management of dependencies is essential, and the best way to manage
+something is with a tool. If you can't build software without explicitly
+declaring a dependency, you can't sneak a dependnency in while no-one is looking.
+
+Bob also goes further and insists on no circularities between files or directories.
+This may seem like a harch constraint, but it is a very useful design tool, and
+in the experience of the writer, leads to better, more maintainable designs.
+
+
+Rules
+-----
+
+Files and their owning directories are arranged in a tree with cross-linked
+dependencies. Each node in the tree can be public or protected. The root of the
+tree contains its children publicly.
+
+The dependency rules are:
+* A protected node can only be referred to by sibling nodes or nodes contained
+  by those siblings.
+* A node (A) can only refer to another node (B) if A's parent transitively refers
+  to or transitively contains node B.
+* Circular dependencies are not allowed.
+
+An object file can only be used once - either in a library or an executable.
+Dynamic libraries don't count as a use - they are just a repackaging.
+
+A dynamic library cannot contain the same static library as another dynamic library.
+

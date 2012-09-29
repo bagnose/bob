@@ -1,0 +1,5 @@
+This is the example project's main package (the nme is arbitrary, but main is
+often useful. A top-level project package's primary purpose is to refer to the
+other top-level packages, but it often also contains configuration files,
+documentation and executables that package together large chunks of code from
+other packages.
