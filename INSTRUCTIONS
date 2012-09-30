@@ -38,9 +38,7 @@ your repository might be in ~/source/myproject, and you might have build
 directories ~/builds/myproject/debug, ~/builds/myproject/profile,
 ~/builds/myproject/release.
 
-The build directory has links back to the subdirectories of the:
-* Directory that bob-config was run from, and
-* Directories listed in the REPOS variable in the bob config file.
+The build directory has links back to the source.
 
 A typical repoitory directory structure is:
 
@@ -70,6 +68,8 @@ src
 obj
   dirs-matching-source-dir-tree
     intermediate-build-artifacts
+tmp
+  assorted temporary files
 priv
   dirs-matching-source-dir-tree
     private-finished-build-artifacts
@@ -93,7 +93,7 @@ target to specify on the command-line. This isn't a problem because:
   unit tests, you quickly get to the point of failure during debugging.
 
 The "mostly" above refers to the jitter in build order that occurs when building
-with multiple processes.
+with multiple cores.
 
 The build process is controlled by Bobfiles. The top-level source directory
 (specified in the config file) contains the top-level Bobfile, and it brings in
@@ -109,7 +109,7 @@ Bobfile syntax is:
 where a parameter is a space-separated list of tokens.
 
 Statements often refer to files and directories.
-Files are always in the same directory as the Bobfile.
+Files are always relative to the same directory as the Bobfile.
 Directories are either a subdirectory of the directory containing
 the Bobfile, or relative to the build directory's src subdirectory,
 depending on the statement.
@@ -133,7 +133,7 @@ Refer
 
 refer paths-from-source-root;
 
-eg: refer math tools/analysis;
+eg: refer framework alg/math;
 
 Specifies that this directory has access to the listed directories.
 
@@ -147,8 +147,15 @@ eg: static-lib math : matrix.h alg.h : matrix.cc alg.cc : m;
 
 Specifes a static library. All the source files should be in the same language,
 or in a language from which the library's language files can be generated.
+Exceptions:
+* .c files can mix with others.
+* Files without commands (eg header files) can mix with others.
 
 The public files are those that client code needs to import/include.
+
+Note that the required system libraries are used when linking executables
+that use the static library or a dynamic library built on the static library.
+In practice, executables rarely have to specify required system librares.
 
 
 Dynamic Lib
@@ -163,9 +170,21 @@ Executables defined after a dynamic library will link to the dynamic library
 rather than the static library.
 
 The contained static-libs all have to be declared in the current Bobfile
-or in a transitively contained directoy's Bobfile.
-The last element can optionally be omitted if it is the same as the
+or in a transitively contained directory's Bobfile.
+The last path element can optionally be omitted if it is the same as the
 containing directory name, which is usually the case.
+
+For example, if the directory structure is:
+  one - defines dynamic library "one"
+    two - defines static library "two"
+    three - defines static library "three"
+then the statement in one's Bobfile to generate the dynamic library is:
+
+dynamic-lib one : two three;
+
+or, if you want to do it in full, which you must if the names don't match:
+
+dynamic-lib one : two/two three/three;
 
 
 Executable
@@ -223,14 +242,14 @@ Dependencies
 Discussion
 ----------
 
-A major preoccupation of bob is with dependencies. This is because on large
+Dependencies are a major preoccupation of bob. This is because on large
 projects, management of dependencies is essential, and the best way to manage
 something is with a tool. If you can't build software without explicitly
 declaring a dependency, you can't sneak a dependnency in while no-one is looking.
 
 Bob also goes further and insists on no circularities between files or directories.
 This may seem like a harch constraint, but it is a very useful design tool, and
-in the experience of the writer, leads to better, more maintainable designs.
+in the experience of the author, leads to better, more maintainable designs.
 
 
 Rules
@@ -241,9 +260,9 @@ dependencies. Each node in the tree can be public or protected. The root of the
 tree contains its children publicly.
 
 The dependency rules are:
-* A protected node can only be referred to by sibling nodes or nodes contained
-  by those siblings.
-* A node (A) can only refer to another node (B) if A's parent transitively refers
+* A protected node can only be referred to by sibling nodes or nodes transitively
+  contained by those siblings.
+* Node (A) can only refer to another node (B) if A's parent transitively refers
   to or transitively contains node B.
 * Circular dependencies are not allowed.
 
@@ -252,3 +271,5 @@ Dynamic libraries don't count as a use - they are just a repackaging.
 
 A dynamic library cannot contain the same static library as another dynamic library.
 
+All static libraries referred to by the static libraries in a dynamic library
+must themselves be packaged in dyamic libraries.

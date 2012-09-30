@@ -37,11 +37,17 @@ import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
 // TODO
-// * Recursive variable expansion.
-// * Dependence on built generation tools.
-// * Elimination of specific statements.
+// * Dependence on built generation tools, and using them.
+// * Generation of documentation from (say) rst files.
 // * Generation of documentation from the code.
-// * Get it all working.
+// * Running tests.
+// * Script files.
+// * Data files.
+// * Conditional Bobfile statements.
+// * Apply needed libs when building dynamic libraries.
+// * Allow relative source paths to subdirectories that aren't pakages.
+// * Treat include files in C_EXTERN directories as system includes,
+//   even if in double-quotes.
 
 /*
 
@@ -1694,11 +1700,20 @@ final class StaticLib : Binary {
         super(origin, pkg, name_, _path, publicSources, protectedSources, sysLibs);
 
         // Decide on an action.
-        LinkCommand *linkCommand = sourceExt in linkCommands;
-        errorUnless(linkCommand && linkCommand.staticLib.length, origin,
-                    "No link command for static lib from %s", sourceExt);
-        action = new Action(origin, format("%-15s %s", "StaticLib", path),
-                            linkCommand.staticLib, [this], objs);
+        string actionName = format("%-15s %s", "StaticLib", path);
+        if (objs.length > 0) {
+          // A proper static lib with object files
+          LinkCommand *linkCommand = sourceExt in linkCommands;
+          errorUnless(linkCommand && linkCommand.staticLib.length, origin,
+                      "No link command for static lib from '%s'", sourceExt);
+          action = new Action(origin, actionName,
+                              linkCommand.staticLib, [this], objs);
+        }
+        else {
+          // A place-holder file to fit in with dependency tracking
+          action = new Action(origin, actionName,
+                              "echo \"dummy\" > ${OUTPUT}", [this], []);
+        }
     }
 }
 

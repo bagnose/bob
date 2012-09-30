@@ -10,7 +10,7 @@ Some of bob's features that are useful on large projects are:
 * Very simple configuration files.
 
 * Enforcement of dependency control, with prevention of circularities between
-  modules and packages (directories).
+  modules and directories.
 
 * Automatic deduction of which project libraries to link with.
 
@@ -19,25 +19,4 @@ Some of bob's features that are useful on large projects are:
 * Generated files are not scanned for imports/includes until after they are up to date.
 
 
-While Bob already works, it is still a bit raw and unready for the real world.
-For example, it only works on Linux and only supports gcc and dmd compilers.
-
-It has been placed on GitHub as a starting point on its transformation into an
-open-source package.
-
-
-The current todo list is:
-
-* Change the rules to be configurable via a text configuration file, rather
-  than requiring users to modify bob's source code.
-
-* Provide built-in configuration files for dmd, gdc, gcc and g++.  
-
-* Change configure_functions into a configurable configure utility, so that
-  users don't need to write their own configure programs.
-
-* Improve documentation.
-
-* Provide examples.
-
-* Port to Windows and OS-X.
+Bob is currently only available for Linux.

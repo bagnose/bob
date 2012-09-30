@@ -1,0 +1,3 @@
+static-lib based : one.d;
+
+#test-exe test-one : test_one.d;

@@ -46,7 +46,7 @@ import core.sys.posix.sys.stat;
 
 
 // TODO only set up src links for top-level packages transitively mentioned
-//      in refer statements in project Bobfile.
+//      in refer statements in project Bobfile, and remove others.
 
 //================================================================
 // Helpers
@@ -208,14 +208,17 @@ void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
     // specified repositories.
     //
 
-    // Make src dir.
-    string srcPath = buildPath(buildDir, "src");
-    if (!exists(srcPath)) {
-        mkdir(srcPath);
+    // Make clean src dir.
+    string localSrcPath = buildPath(buildDir, "src");
+    if (exists(localSrcPath)) {
+        rmdirRecurse(localSrcPath);
     }
+    mkdir(localSrcPath);
 
     // Make a symbolic link to each top-level package in this and other specified repos.
-    string[string] pkgPaths;  // Package paths keyed on package name.
+    // Note - a package is a dir in a refer statement in a top-level Bobfile, starting
+    // from the project package.
+
     assert("PROJECT" in vars && vars["PROJECT"].length, "PROJECT variable is not set");
     string project = vars["PROJECT"][0];
     string[] repoPaths = [srcDir];
@@ -224,23 +227,76 @@ void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
             repoPaths ~= buildPath(srcDir, path);
         }
     }
-    foreach (string repoPath; repoPaths) {
-        if (isDir(repoPath)) {
-            //writefln("Adding source links for packages in %s.", repoPath);
-            foreach (string path; dirEntries(repoPath, SpanMode.shallow)) {
-                string pkgName = baseName(path);
-                if (isDir(path) && pkgName[0] != '.') {
-                    //writefln("  Found top-level package %s.", pkgName);
-                    assert(pkgName !in pkgPaths,
-                           format("Package %s found at %s and %s",
-                                  pkgName, pkgPaths[pkgName], path));
-                    pkgPaths[pkgName] = path;
+
+    string[string] pkgPaths;
+
+    // Local function to get and check references from a dir's Bobfile
+    void getReferences(string path) {
+        if (!exists(path) || !isDir(path)) {
+            writefln("No directory at %s", path);
+            exit(1);
+        }
+        string bobfile = buildPath(path, "Bobfile");
+        if (!exists(bobfile)) {
+            writefln("Cannot find Bobfile in %s", path);
+            exit(1);
+        }
+        string[] lines = splitLines(readText(bobfile));
+        bool inRefer;
+        foreach(line; lines) {
+            string[] tokens = split(line);
+            if (tokens.length > 0 && tokens[0] == "refer") {
+                inRefer = true;
+                tokens = tokens[1..$];
+            }
+            if (inRefer) {
+                foreach (token; tokens) {
+                    if (token[$-1] == ';') {
+                        inRefer = false;
+                        token = token[0..$-1];
+                    }
+
+                    if (token.length > 0) {
+                        string pkgName = token;
+                        if (pkgName !in pkgPaths) {
+                            string pkgPath;
+                            foreach (dir; repoPaths) {
+                              string tryPath = buildPath(dir, pkgName);
+                              if (isDir(tryPath)) {
+                                  if (pkgPath == null) {
+                                    pkgPath = tryPath;
+                                  }
+                                  else {
+                                      writefln("Found package %s in both %s and %s",
+                                               pkgName, pkgPath, tryPath);
+                                      exit(1);
+                                  }
+                              }
+                            }
+                            if (pkgPath is null) {
+                                writefln("Could not find package %s referenced from %s",
+                                         pkgName, bobfile);
+                                exit(1);
+                            }
+                            else {
+                                pkgPaths[pkgName] = pkgPath;
+                                getReferences(pkgPath);
+                            }
+                        }
+                    }
+
+                    if (!inRefer) break;
                 }
             }
         }
     }
+
+    string projectPath = buildPath(srcDir, project);
+    pkgPaths[project] = projectPath;
+    getReferences(projectPath);
+
     foreach (name, path; pkgPaths) {
-        string linkPath = buildPath(srcPath, name);
+        string linkPath = buildPath(localSrcPath, name);
         system(format("ln -sfn %s %s", path, linkPath));
     }
 

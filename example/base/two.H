@@ -1,0 +1,1 @@
+double cube(double x);
