@@ -37,10 +37,10 @@ import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
 // TODO
+// * Terminate bailer thread properly.
 // * Dependence on built generation tools, and using them.
 // * Generation of documentation from (say) rst files.
 // * Generation of documentation from the code.
-// * Running tests.
 // * Script files.
 // * Data files.
 // * Conditional Bobfile statements.
@@ -1365,18 +1365,10 @@ class File : Node {
 
                 File * file;
                 // under src using full trail?
-                File * include = cast(File *) (buildPath("src", entry.trail) in byPath);
-                if (include is null && baseName(entry.trail) == entry.trail) {
-                    // in src dir of the including file's package?
-                    include = cast(File *) (prospectivePath("src", parent, entry.trail) in byPath);
-                }
+                File * include = buildPath("src", entry.trail) in byPath;
                 if (include is null) {
                     // under obj?
-                    include = cast(File *) (buildPath("obj", entry.trail) in byPath);
-                }
-                if (include is null) {
-                    // build dir?
-                    include = entry.trail in byPath;
+                    include = buildPath("obj", entry.trail) in byPath;
                 }
                 Origin origin = Origin(this.path, entry.line);
                 errorUnless(include !is null, origin, "included/imported unknown file %s", entry.trail);
@@ -1434,7 +1426,7 @@ class File : Node {
         long newest;
 
         if (activated && action && !action.issued) {
-            // this items action may need to be issued
+            // this item's action may need to be issued
             //say("activated file %s touched", this);
 
             foreach (depend; action.depends) {
@@ -1461,7 +1453,7 @@ class File : Node {
                 if (modTime < newest) {
                     // buildable and out of date - issue action to worker
                     if (g_print_details) {
-                        say("%s is out of date with mod_time ", this, modTime);
+                        say("%s is out of date with mod_time %s", this, modTime);
                         File other      = youngestDepend;
                         File prevOther = this;
                         while (other && other.includeModTime > prevOther.modTime) {
@@ -1485,7 +1477,8 @@ class File : Node {
         }
 
         if (action)   return;
-        errorUnless(modTime > 0, Origin(path, 1), "%s (%s) is up to date with zero mod_time!", path, trail);
+        errorUnless(modTime > 0, Origin(path, 1),
+                    "%s (%s) is up to date with zero mod_time!", path, trail);
         // This file is up to date
 
         // Scan for includes, possibly becoming clean in the process
@@ -1872,13 +1865,13 @@ final class Exe : Binary {
         action = new Action(origin, format("%-15s %s", desc, dest), linkCommand.executable, [this], objs);
 
         if (kind == "test-exe") {
-            File test   = new File(origin, pkg, name ~ "-result",
+            File result = new File(origin, pkg, name ~ "-result",
                                    Privacy.PRIVATE, dest ~ "-passed", false, true);
-            test.action = new Action(origin,
-                                     format("%-15s %s", "TestResult", test.path),
-                                     format("TEST %s", dest),
-                                     [test],
-                                     [this]);
+            result.action = new Action(origin,
+                                       format("%-15s %s", "TestResult", result.path),
+                                       format("TEST %s", this.path),
+                                       [result],
+                                       [this]);
         }
     }
 
@@ -2257,7 +2250,10 @@ bool doPlanning(int numJobs, bool printStatements, bool printDeps, bool printDet
                 string targets;
                 foreach (target; next.builds) {
                     ensureParent(target.path);
-                    targets ~= "|" ~ target.path;
+                    if (targets.length > 0) {
+                        targets ~= "|";
+                    }
+                    targets ~= target.path;
                 }
                 //say("issuing action %s", next.name);
                 send(tid, next.name.idup, next.command.idup, targets.idup);
@@ -2314,8 +2310,20 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         success = false;
         string results = buildPath("tmp", myName);
 
+        bool isTest = false;
+        string tmpPath;
+        if (command.length > 5 && command[0..5] == "TEST ") {
+            // Do test preparation - choose tmp dir and remove it, and set it on command
+            isTest = true;
+            tmpPath = buildPath("tmp", myName ~ "-test");
+            if (exists(tmpPath)) {
+                rmdirRecurse(tmpPath);
+            }
+            command = "TMP_PATH=" ~ tmpPath ~ " " ~ command[5..$];
+        }
+
         // launch child process to do the action
-        string str = command ~ " 2>" ~ results;
+        string str = command ~ " >" ~ results ~ " 2>&1";
         pid_t child = launcher.launch(str);
 
         // wait for it to complete
@@ -2364,6 +2372,23 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             }
         }
         else {
+            // Success.
+
+            if (isTest) {
+                // Append a success line to results file to make sure it is not empty
+                append(results, "\nPASSED\n");
+
+                // Remove tmpPath and copy results file onto build target
+                if (exists(tmpPath)) {
+                    rmdirRecurse(tmpPath);
+                }
+                string[] tokens = split(targets, "|");
+                if (tokens.length != 1) {
+                    fatal("Expected exactly one target for a test, but got '%s'", targets);
+                }
+                copy(results, tokens[0]);
+            }
+
             // tell planner the action succeeded
             send(plannerTid, myName, action);
         }
@@ -2452,6 +2477,21 @@ int main(string[] args) {
         if (printDetails) {
             printActions = true;
             printDeps = true;
+        }
+
+        // Set environment variables found in the environment file
+        if (exists("environment")) {
+            string envContent = readText("environment");
+            foreach (line; splitLines(envContent)) {
+                string[] tokens = split(line, "=");
+                if (tokens.length == 2 && tokens[0][0] != '#') {
+                    if (tokens[1][0] == '"') {
+                        tokens[1] = tokens[1][1..$-1];
+                    }
+                    say("Setting environment variable '%s' to '%s'", tokens[0], tokens[1]);
+                    setenv(tokens[0], tokens[1], true);
+                }
+            }
         }
 
         // spawn the workers

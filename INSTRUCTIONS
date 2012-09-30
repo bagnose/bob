@@ -55,7 +55,7 @@ the top level Bobfile.
 To configure a build directory from a repo that looks like the above:
 
 cd repo-root/source-root
-bob-config --config=bob.cfg --mode=debug ~/builds/myproject/debug
+bob-config --mode=debug ~/builds/myproject/debug
 
 
 The build directory contains:
