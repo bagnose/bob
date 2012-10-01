@@ -37,7 +37,7 @@ import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
 // TODO
-// * Terminate bailer thread properly.
+// * Provide better support for non-standard system paths.
 // * Dependence on built generation tools, and using them.
 // * Generation of documentation from (say) rst files.
 // * Generation of documentation from the code.
@@ -45,7 +45,7 @@ import core.sys.posix.signal;
 // * Data files.
 // * Conditional Bobfile statements.
 // * Apply needed libs when building dynamic libraries.
-// * Allow relative source paths to subdirectories that aren't pakages.
+// * Allow relative source paths to subdirectories that aren't packages.
 // * Treat include files in C_EXTERN directories as system includes,
 //   even if in double-quotes.
 
@@ -273,7 +273,6 @@ synchronized class Launcher {
         if (!bailed) {
             bailed = true;
             foreach (child; children.byKey) {
-                //say("killing child, pid=%s", child);
                 kill(child, SIGTERM);
             }
             return false;
@@ -1704,8 +1703,7 @@ final class StaticLib : Binary {
         }
         else {
           // A place-holder file to fit in with dependency tracking
-          action = new Action(origin, actionName,
-                              "echo \"dummy\" > ${OUTPUT}", [this], []);
+          action = new Action(origin, actionName, "DUMMY", [this], []);
         }
     }
 }
@@ -2236,13 +2234,11 @@ bool doPlanning(int numJobs, bool printStatements, bool printDeps, bool printDet
 
             if (exiting) {
                 // tell idle worker to terminate
-                //say("telling %s to terminate", idler);
                 send(tid, true);
                 toilers ~= idler;
             }
             else if (!Action.queue.empty) {
                 // give idle worker an action to perform
-                //say("giving %s an action", idler);
 
                 const Action next = Action.queue.front();
                 Action.queue.popFront();
@@ -2312,7 +2308,15 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
 
         bool isTest = false;
         string tmpPath;
-        if (command.length > 5 && command[0..5] == "TEST ") {
+
+        if (command == "DUMMY ") {
+            // Just write some text into the target file
+            std.file.write(targets, "dummy");
+            send(plannerTid, myName, action);
+            return;
+        }
+
+        else if (command.length > 5 && command[0..5] == "TEST ") {
             // Do test preparation - choose tmp dir and remove it, and set it on command
             isTest = true;
             tmpPath = buildPath("tmp", myName ~ "-test");
@@ -2349,11 +2353,14 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             }
         }
         launcher.completed(child);
+
+        string[] targs = split(targets, "|");
+
         if (!success) {
             bool bailed = launcher.bail;
 
             // delete built files
-            foreach (target; split(targets, "|")) {
+            foreach (target; targs) {
                 if (exists(target)) {
                     say("  Deleting %s", target);
                     std.file.remove(target);
@@ -2366,10 +2373,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
                 say("%s: FAILED\n%s", action, command);
                 say("Aborting build due to action failure");
             }
-            else {
-                // Someone else bailed already, so just quietly throw
-                throw new BailException();
-            }
+            throw new BailException();
         }
         else {
             // Success.
@@ -2382,11 +2386,10 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
                 if (exists(tmpPath)) {
                     rmdirRecurse(tmpPath);
                 }
-                string[] tokens = split(targets, "|");
-                if (tokens.length != 1) {
+                if (targs.length != 1) {
                     fatal("Expected exactly one target for a test, but got '%s'", targets);
                 }
-                copy(results, tokens[0]);
+                copy(results, targs[0]);
             }
 
             // tell planner the action succeeded
@@ -2488,7 +2491,6 @@ int main(string[] args) {
                     if (tokens[1][0] == '"') {
                         tokens[1] = tokens[1][1..$-1];
                     }
-                    say("Setting environment variable '%s' to '%s'", tokens[0], tokens[1]);
                     setenv(tokens[0], tokens[1], true);
                 }
             }
