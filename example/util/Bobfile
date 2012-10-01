@@ -1,5 +1,4 @@
-#refer base based;
-refer base;
+refer base based;
 
 dist-exe util1 : util1.cpp;
-#dist-exe util2 : util2.d;
+dist-exe util2 : util2.d;

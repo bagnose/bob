@@ -124,6 +124,15 @@ string toEnv(string envName, const ref Vars vars, string varName, string[] extra
 
 
 //
+// Return an array of strings parsed from an environment variable.
+//
+string[] fromEnv(string varname) {
+    return split(std.process.getenv(varname), ":");
+}
+
+
+
+//
 // Write content to path if it doesn't already match, creating the file
 // if it doesn't already exist. The file's executable flag is set to the
 // value of executable.
@@ -185,14 +194,14 @@ void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
 
 
     // Create environment file.
-    string envText;
     string lib  = buildPath(buildDir, "dist", "lib");
     string bin  = buildPath(buildDir, "dist", "bin");
     string data = buildPath(buildDir, "dist", "data");
     string env  = buildPath(buildDir, "environment");
+    string envText;
     envText ~= "#!/bin/bash\n";
-    envText ~= toEnv("LD_LIBRARY_PATH", vars, "SYS_LIB",  [lib]);
-    envText ~= toEnv("PATH",            vars, "SYS_PATH", [bin, "/bin", "/usr/bin"]);
+    envText ~= toEnv("LD_LIBRARY_PATH", vars, "SYS_LIB",  [lib] ~ fromEnv("LD_LIBRARY_PATH"));
+    envText ~= toEnv("PATH",            vars, "SYS_PATH", [bin] ~ fromEnv("PATH"));
     envText ~= "DIST_DATA_PATH=\"" ~ data ~ "\"\n";
     update(env, envText, false);
 
