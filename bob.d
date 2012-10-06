@@ -37,17 +37,17 @@ import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
 // TODO
-// * Provide better support for non-standard system paths.
-// * Dependence on built generation tools, and using them.
-// * Generation of documentation from (say) rst files.
-// * Generation of documentation from the code.
+// * Apply needed libs when building dynamic libraries.
 // * Script files.
 // * Data files.
+// * Allow relative source paths to subdirectories that aren't packages,
+//   (like test/test_one.cpp).
+// * Generation of documentation from (say) rst files.
+// * Dependence on built generation tools, and using them.
 // * Conditional Bobfile statements.
-// * Apply needed libs when building dynamic libraries.
-// * Allow relative source paths to subdirectories that aren't packages.
 // * Treat include files in C_EXTERN directories as system includes,
 //   even if in double-quotes.
+// * Generation of documentation from the code.
 
 /*
 

@@ -45,9 +45,6 @@ import core.stdc.stdlib;
 import core.sys.posix.sys.stat;
 
 
-// TODO only set up src links for top-level packages transitively mentioned
-//      in refer statements in project Bobfile, and remove others.
-
 //================================================================
 // Helpers
 //================================================================
