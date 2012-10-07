@@ -37,7 +37,6 @@ import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
 // TODO
-// * Apply needed libs when building dynamic libraries.
 // * Script files.
 // * Data files.
 // * Generation of documentation from (say) rst files.
@@ -114,6 +113,7 @@ Bob assumes that new packages, libraries, etc
 are mentioned in dependency order. That is, when each thing is
 mentioned, everything it depends on, including dependencies inferred by
 include/import statements in source code, has already been mentioned.
+Exception: a Bobfile can refer to previously-unknown packages.
 
 The planner scans the Bobfiles, binding files to specific
 locations in the filesystem as it goes, and builds the dependency graph.
