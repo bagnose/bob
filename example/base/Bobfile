@@ -8,8 +8,14 @@ static-lib mid :
                   pthread m
                 ;
 
-test-exe test-one : test_one.cpp; # uses static-lib
+test-exe test-one : test_one.cpp;
+test-exe test-two : test_two.cpp;
 
 dynamic-lib base : low mid;
 
-test-exe test-two : test_two.cpp; # uses dynamic-lib
+
+static-lib extra : extra.h : extra.cpp;
+
+dynamic-lib extra : extra;
+
+test-exe test-extra : test_extra.cpp;

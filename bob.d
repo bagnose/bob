@@ -40,13 +40,13 @@ import core.sys.posix.signal;
 // * Apply needed libs when building dynamic libraries.
 // * Script files.
 // * Data files.
-// * Allow relative source paths to subdirectories that aren't packages,
-//   (like test/test_one.cpp).
 // * Generation of documentation from (say) rst files.
 // * Dependence on built generation tools, and using them.
 // * Conditional Bobfile statements.
 // * Treat include files in C_EXTERN directories as system includes,
 //   even if in double-quotes.
+// * Allow relative source paths to subdirectories that aren't packages,
+//   (like test/test_one.cpp).
 // * Generation of documentation from the code.
 
 /*
@@ -1077,6 +1077,14 @@ final class SysLib {
         number       = nextNumber++;
         byName[name] = this;
     }
+
+    override int opCmp(Object o) const {
+        // reverse order
+        if (this is o) return 0;
+        SysLib a = cast(SysLib)o;
+        if (a is null) return  -1;
+        return a.number - number;
+    }
 }
 
 
@@ -1520,6 +1528,16 @@ class File : Node {
             if (other.activated) other.touch;
         }
     }
+
+    // Sort Files by decreasing number order. Used to determine the order
+    // in which libraries are linked.
+    override int opCmp(Object o) const {
+        // reverse order
+        if (this is o) return 0;
+        File a = cast(File)o;
+        if (a is null) return  -1;
+        return a.number - number;
+    }
 }
 
 
@@ -1537,7 +1555,7 @@ string validateExtension(Origin origin, string newExt, string usingExt) {
 }
 
 //
-// Binary - a binary file incorporating object files and 'owning' source files.
+// Binary - a binary file which incorporates object files and 'owns' source files.
 // Concrete implementations are StaticLib and Exe.
 //
 abstract class Binary : File {
@@ -1663,7 +1681,8 @@ abstract class Binary : File {
                 reqBinaries[*container] = true;
 
                 // add a dependancy and a reference
-                addReference(origin, *container, format(" because %s includes %s", includer.path, included.path));
+                addReference(origin, *container, format(" because %s includes %s",
+                                                        includer.path, included.path));
                 action.addDependency(*container);
                 //say("%s requires %s", this.path, container.path);
             }
@@ -1706,6 +1725,80 @@ final class StaticLib : Binary {
           action = new Action(origin, actionName, "DUMMY", [this], []);
         }
     }
+}
+
+// Free function used by DynamicLib and Exe to determine which libraries they
+// need to link with.
+//
+// target is the File that will use the libraries.
+// libs is all the static and system libraries known to be needed from
+// Bobfile statements and source-code include statement.
+//
+// Returns the needed libraries sorted in descending number order,
+// which is the appropriate order for linking.
+void neededLibs(File             target,
+                Binary[]         binaries,
+                ref StaticLib[]  staticLibs,
+                ref DynamicLib[] dynamicLibs,
+                ref SysLib[]     sysLibs) {
+
+    bool[Object] done;   // Everything already considered
+
+    staticLibs  = [];
+    dynamicLibs = [];
+    sysLibs     = [];
+
+    void accumulate(Object obj) {
+        if (obj in done) return;
+        done[obj] = true;
+
+        Exe        exe  = cast(Exe)        obj;
+        StaticLib  slib = cast(StaticLib)  obj;
+        DynamicLib dlib = cast(DynamicLib) obj;
+        SysLib     sys  = cast(SysLib)     obj;
+
+        if (exe !is null) {
+            foreach (other; exe.reqBinaries.keys) {
+                accumulate(other);
+            }
+            foreach (other; exe.reqSysLibs.keys) {
+                accumulate(other);
+            }
+        }
+        else if (slib !is null) {
+            foreach (other; slib.reqBinaries.keys) {
+                accumulate(other);
+            }
+            foreach (other; slib.reqSysLibs.keys) {
+                accumulate(other);
+            }
+            DynamicLib* dynamic = slib in DynamicLib.byContent;
+            if (dynamic is null || dynamic.number > target.number) {
+                if (slib.objs.length > 0) {
+                    staticLibs ~= slib;
+                }
+            }
+            else {
+                accumulate(*dynamic);
+            }
+        }
+        else if (dlib !is null) {
+            dynamicLibs ~= dlib;
+        }
+        else if (sys !is null) {
+            sysLibs ~= sys;
+        }
+        else {
+            fatal("logic error");
+        }
+    }
+
+    foreach (obj; binaries) {
+        accumulate(obj);
+    }
+    staticLibs.sort();
+    dynamicLibs.sort();
+    sysLibs.sort();
 }
 
 
@@ -1785,49 +1878,31 @@ final class DynamicLib : File {
         if (augmented) return false;
         augmented = true;
 
-        bool[StaticLib] doneStaticLibs;
-        bool[SysLib]    gotSysLibs;
-        SysLib[]        sysLibs;
-        bool            added;
+        StaticLib[]  neededStaticLibs;
+        DynamicLib[] neededDynamicLibs;
+        SysLib[]     neededSysLibs;
 
-        //say("augmenting action for DynamicLib %s", name);
-
-        void accumulate(StaticLib lib) {
-            //say("  accumulating %s", lib.name);
-            foreach (other; lib.reqBinaries.keys) {
-                StaticLib next = cast(StaticLib) other;
-                assert(next !is null);
-                if (next !in doneStaticLibs) {
-                    accumulate(next);
-                }
-            }
-            if (lib !in doneStaticLibs) {
-                doneStaticLibs[lib] = true;
-                errorUnless(lib.objs.length == 0 ||
-                            (lib in byContent && byContent[lib].number <= number),
-                            origin,
-                            "dynamic-lib %s requires static-lib %s (%s) which "
-                            "is not contained in a pre-defined dynamic-lib",
-                            name, lib.trail, lib.path);
-                foreach (sys; lib.reqSysLibs.keys) {
-                    if (sys !in gotSysLibs) {
-                        gotSysLibs[sys] = true;
-                        sysLibs ~= sys;
-                    }
-                }
-            }
-        }
-
-        foreach (lib; staticLibs) {
-            accumulate(lib);
-        }
+        neededLibs(this, cast(Binary[]) staticLibs, neededStaticLibs, neededDynamicLibs, neededSysLibs);
 
         string[] libs;
-        foreach (sys; sysLibs) {
-            libs ~= sys.name;
+        bool added;
+
+        if (neededStaticLibs !is null) {
+            fatal("Dynamic lib %s cannot require static libs, but requires %s",
+                  path, neededStaticLibs);
+        }
+        foreach (lib; neededDynamicLibs) {
+            if (lib !is this) {
+                action.addDependency(lib);
+                libs ~= lib.uniqueName;
+                added = true;
+            }
+        }
+        foreach (lib; neededSysLibs) {
+            libs ~= lib.name;
         }
         action.finaliseCommand(libs);
-        return false;
+        return added;
     }
 }
 
@@ -1879,102 +1954,29 @@ final class Exe : Binary {
     override bool augmentAction() {
         if (augmented) return false;
         augmented = true;
-        bool added = false;
-        //say("augmenting %s's action command", this);
 
-        // local struct to remember what libraries are needed in which order
-        struct Needed {
-            int    number;
-            string name;
+        StaticLib[]  neededStaticLibs;
+        DynamicLib[] neededDynamicLibs;
+        SysLib[]     neededSysLibs;
 
-            int opCmp(ref const Needed other) const {
-                // order by highest number first
-                return other.number - number;
-            }
-        }
-
-        // binaries we require
-        bool[DynamicLib] gotDynamicLibs;
-        bool[StaticLib]  gotStaticLibs;
-        bool[SysLib]     gotSysLibs;
-        Needed[]         localLibs;
-        Needed[]         sysLibs;
-
-        // accumulate the libraries needed
-        void accumulate(Binary binary) {
-            //say("accumulating binary %s", binary.path);
-            foreach (other; binary.reqBinaries.keys) {
-                StaticLib lib = cast(StaticLib) other;
-                assert(lib !is null);
-                if (lib !in gotStaticLibs) {
-                    accumulate(other);
-                }
-            }
-            if (binary is this) {
-                foreach (sys; reqSysLibs.keys) {
-                    if (sys !in gotSysLibs) {
-                        //say("    using sys-lib %s", sys.name);
-                        gotSysLibs[sys] = true;
-                        sysLibs ~= Needed(sys.number, sys.name);
-                    }
-                }
-            }
-            else {
-                StaticLib lib = cast(StaticLib) binary;
-                if (lib !in gotStaticLibs) {
-                    //say("  require static-lib %s", lib.uniqueName);
-                    gotStaticLibs[lib] = true;
-                    foreach (sys; lib.reqSysLibs.keys) {
-                        if (sys !in gotSysLibs) {
-                            //say("    using sys-lib %s", sys.name);
-                            gotSysLibs[sys] = true;
-                            sysLibs ~= Needed(sys.number, sys.name);
-                        }
-                    }
-
-                    DynamicLib* dynamic = lib in DynamicLib.byContent;
-                    if (dynamic !is null && dynamic.number < this.number) {
-                        // use the dynamic lib that contains the static lib, using the static's number
-                        if (*dynamic !in gotDynamicLibs) {
-                            //say("    using dynamic-lib %s to cover %s", dynamic.name, lib.uniqueName);
-                            gotDynamicLibs[*dynamic] = true;
-                            localLibs ~= Needed(dynamic.number, dynamic.uniqueName);
-                            action.addDependency(*dynamic);
-                            added = true;
-
-                            // we have to also accumulate everything this dynamic lib needs
-                            foreach (contained; dynamic.staticLibs) {
-                                accumulate(contained);
-                            }
-                        }
-                    }
-                    else {
-                        // use the static lib
-                        //say("    using static-lib %s", lib.uniqueName);
-                        action.addDependency(lib);
-                        added = true;
-                        if (lib.objs.length) {
-                            // this static lib is not a dummy - use it
-                            localLibs ~= Needed(lib.number, lib.uniqueName);
-                        }
-                    }
-                }
-            }
-        }
-
-        //say("accumulating required libraries for exe %s", path);
-        accumulate(this);
-
-        string extra;
+        neededLibs(this, [this], neededStaticLibs, neededDynamicLibs, neededSysLibs);
 
         string[] libs;
-        foreach (needed; localLibs.sort) {
-            libs ~= needed.name;
-        }
-        foreach (needed; sysLibs.sort) {
-            libs ~= needed.name;
-        }
+        bool added;
 
+        foreach (lib; neededStaticLibs) {
+            action.addDependency(lib);
+            libs ~= lib.uniqueName;
+            added = true;
+        }
+        foreach (lib; neededDynamicLibs) {
+            action.addDependency(lib);
+            libs ~= lib.uniqueName;
+            added = true;
+        }
+        foreach (lib; neededSysLibs) {
+            libs ~= lib.name;
+        }
         action.finaliseCommand(libs);
         return added;
     }

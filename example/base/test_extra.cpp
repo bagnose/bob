@@ -1,4 +1,4 @@
-#include "base/two.h"
+#include "base/extra.h"
 #include "base/macros.h"
 
 #include <iostream>
@@ -6,8 +6,8 @@
 int main(int argc, char *argv[])
 {
     double x = 5.0;
-    double xxx = cube(x);
+    double xxxx = quad(x);
 
-    ASSERT(xxx = x * x * x, "Unexpected result");
+    ASSERT(xxxx = x * x * x * x, "Unexpected result");
     return 0;
 }

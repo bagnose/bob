@@ -324,6 +324,11 @@ Vars parseConfig(string configFile, string mode) {
     string  commandType;
     Vars    vars;
 
+    if (!exists(configFile)) {
+        writefln("Could not file config file %s", configFile);
+        exit(1);
+    }
+
     string content = readText(configFile);
     foreach (string line; splitLines(content)) {
 
