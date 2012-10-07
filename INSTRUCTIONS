@@ -40,7 +40,7 @@ directories ~/builds/myproject/debug, ~/builds/myproject/profile,
 
 The build directory has links back to the source.
 
-A typical repoitory directory structure is:
+A typical repository directory structure is:
 
 repo-root
   assorted-uninteresting-files
@@ -145,7 +145,7 @@ static-lib lib-name : public-source [: protected-source [: required-system-libs]
 
 eg: static-lib math : matrix.h alg.h : matrix.cc alg.cc : m;
 
-Specifes a static library. All the source files should be in the same language,
+Specifies a static library. All the source files should be in the same language,
 or in a language from which the library's language files can be generated.
 Exceptions:
 * .c files can mix with others.
@@ -245,11 +245,11 @@ Discussion
 Dependencies are a major preoccupation of bob. This is because on large
 projects, management of dependencies is essential, and the best way to manage
 something is with a tool. If you can't build software without explicitly
-declaring a dependency, you can't sneak a dependnency in while no-one is looking.
+declaring a dependency, you can't sneak a dependency in while no-one is looking.
 
 Bob also goes further and insists on no circularities between files or directories.
-This may seem like a harch constraint, but it is a very useful design tool, and
-in the experience of the author, leads to better, more maintainable designs.
+This may seem like a harsh constraint, but it is a very useful design tool, and
+in the experience of the writer, leads to better, more maintainable designs.
 
 
 Rules
