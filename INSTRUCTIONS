@@ -74,9 +74,10 @@ priv
   dirs-matching-source-dir-tree
     private-finished-build-artifacts
 dist
-  lib       - Contains dynamic libraries.
+  lib       - Contains public static libraries and all dynamic libraries.
   bin       - Contains executables and scripts.
   data      - Contains data files.
+  include   - contains public include files for public static libraries.
 
 
 Building
@@ -109,10 +110,25 @@ Bobfile syntax is:
 where a parameter is a space-separated list of tokens.
 
 Statements often refer to files and directories.
-Files are always relative to the same directory as the Bobfile.
-Directories are either a subdirectory of the directory containing
-the Bobfile, or relative to the build directory's src subdirectory,
-depending on the statement.
+The rules for determining the paths referred to are:
+
+* Source files are either src/chain/name or obj/chain/name, where
+  chain in the chain of directory names leading to the Bobfile,
+  and name is the name specified in the Bobfile statement.
+
+  Example: if a Bobfile in tools/hammer has a library that contains source
+  file claw.h, it is looked for in src/tools/hammer/claw.h and
+  obj/tools/hammer/claw.h. It is an error for the file to be in both
+  locations.
+
+* Directories can be "beneath" the current directory. For example, if a
+  Bobfile in tools has a "contain claw;" statement, the chain of the contained
+  directory is tools/hammer.
+
+* Directories can also be specified from the root. For example,
+  "handyman: may have a "refer tools;" statement to refer to top-level directory
+  "tools".
+  
 
 Statement types are:
 
@@ -142,6 +158,7 @@ Static Lib
 ----------
 
 static-lib lib-name : public-source [: protected-source [: required-system-libs]];
+public-lib lib-name : public-source [: protected-source [: required-system-libs]];
 
 eg: static-lib math : matrix.h alg.h : matrix.cc alg.cc : m;
 
@@ -156,6 +173,13 @@ The public files are those that client code needs to import/include.
 Note that the required system libraries are used when linking executables
 that use the static library or a dynamic library built on the static library.
 In practice, executables rarely have to specify required system librares.
+
+public-lib is identical to static-lib except that:
+* The public include files are copied into dist/include/<chain>
+* If the library is not contained in a dynamic library, the library file is
+  copied into dist/lib.
+* A dynamic lib that incorporates a public-lib must not incorporate any non-public
+  static-libs.
 
 
 Dynamic Lib
@@ -199,41 +223,32 @@ eg: test-exe math-test : math_test.cpp;
 
 dist-exe places the built executable in the dist/bin directory.
 
-util-exe places the build executable in the priv/<path> directory.
+util-exe places the build executable in the priv/<chain> directory.
 
-test-exe places the built executable in the priv/<path> directory,
+test-exe places the built executable in the priv/<chain> directory,
 and executes the test when its result file is out of date.
 
 The test is run with the TEST_PATH environment variable set to a path
 that the test can use for scratch file I/O if necessary.
 
 
-Script
-------
+Scripts, data and docs
+----------------------
 
-priv-script name;
-dist-script name;
+misc names [: dist-destination-path]
 
-Copies the named file(s) into the build directory's dist/bin or priv/<path>
-directory and makes it executable.
+Copies or (if there is a rule to generate files from the extension)
+generates files that do not contribute to libraries or executables.
+If any of names is a directory, it is recursed into.
 
+For example:
 
-Data
-----
+# copy/build specified files into dist/bin
+misc foo.sh foo2.sh : dist/bin;
 
-priv-data name;
-dist-data name;
-
-Copies the named file(s) and subdirectory(s) into the build directory's
-dist/bin or priv/<path> directory.
-
-
-Documentation
--------------
-
-doc names;
-
-Generates documentation from the named files and places it into priv/<path>.
+# copy/build index.rst into priv/<chain> and files in doc dir and below
+# into priv/<chain>/doc, preserving any subdirectory structure.
+misc index.rst doc;
 
 
 Dependencies

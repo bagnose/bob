@@ -37,11 +37,14 @@ import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
 // TODO
-// * Script files.
-// * Data files.
-// * Generation of documentation from (say) rst files.
+// * Add a mechanism to scrape the names of additional output filenames from
+//   a source file using (say) a regex.
+// * Activate files progressively, and clean out redundant stuff re activation.
 // * Dependence on built generation tools, and using them.
 // * Conditional Bobfile statements.
+// * public-lib rule that auto-copies public headers. A dynamic lib incorporating
+//   a public static lib has to only contain public static libs. A public-lib
+//   that is not incorporated into a dynamic lib is also copied into dist/lib.
 // * Treat include files in C_EXTERN directories as system includes,
 //   even if in double-quotes.
 // * Allow relative source paths to subdirectories that aren't packages,
@@ -1984,6 +1987,72 @@ final class Exe : Binary {
 
 
 //
+// Add a misc file and its target(s), either copying the specified path into
+// destDir, or using a configured command to create the target file(s) if the
+// specified source file has a command extension.
+//
+// If the specified path is a directory, add all its contents instead.
+//
+void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) {
+    if (name[0] == '.') return;
+
+    string fromPath = buildPath("src", pkg.trail, dir, name);
+
+    if (isDir(fromPath)) {
+        foreach (string path; dirEntries(fromPath, SpanMode.shallow)) {
+            miscFile(origin, pkg, buildPath(dir, name), path.baseName, dest);
+        }
+    }
+    else {
+        // Create the source file
+        string ext        = extension(name);
+        string relName    = buildPath(dir, name);
+        File   sourceFile = File.addSource(origin, pkg, relName, Privacy.PUBLIC, false);
+
+        // Decide on the destination directory.
+        string destDir = dest.length == 0 ? 
+            buildPath("priv", pkg.trail, dir) :
+            buildPath("dist", dest, dir);
+
+        GenerateCommand *generate = ext in generateCommands;
+        if (generate is null) {
+            // Target is a simple copy of source file,
+            // set to executable if dest is bin.
+            File destFile = new File(origin, pkg, relName ~ "-copy", Privacy.PRIVATE,
+                                     buildPath(destDir, name), false, true);
+            string extra = dest == "bin" ? format(" && chmod +x %s", destFile.path) : "";
+            destFile.action = new Action(origin,
+                                         format("%-15s %s", "Copy", destFile.path),
+                                         format("cp %s %s%s", sourceFile.path, destFile.path, extra),
+                                         [destFile],
+                                         [sourceFile]);
+        }
+        else {
+            // Generate the target file(s) using a configured command.
+            File[] files;
+            string suffixes;
+            foreach (suffix; generate.suffixes) {
+                string destName = stripExtension(name) ~ suffix;
+                File gen = new File(origin, pkg, destName, Privacy.PRIVATE,
+                                    buildPath(destDir, destName), false, true);
+                files    ~= gen;
+                suffixes ~= suffix ~ " ";
+            }
+            errorUnless(files.length > 0, origin, "Must have at least one destination suffix");
+            Action action = new Action(origin,
+                                       format("%-15s %s", ext ~ "->" ~ suffixes, sourceFile.path),
+                                       generate.command,
+                                       files,
+                                       [sourceFile]);
+            foreach (gen; files) {
+                gen.action = action;
+            }
+        }
+    }
+}
+
+
+//
 // Mark all built files in child or referred packages as needed
 //
 int markNeeded(Node given) {
@@ -2037,7 +2106,7 @@ void processBobfile(string indent, Pkg pkg) {
             case "contain":
                 foreach (name; statement.targets) {
                     errorUnless(dirName(name) == ".", statement.origin,
-                                "Contained packages have to be top-level");
+                                "Contained packages have to be relative");
                     Privacy privacy = privacyOf(statement.origin, statement.arg1);
                     Pkg newPkg = new Pkg(statement.origin, pkg, name, privacy);
                     processBobfile(indent, newPkg);
@@ -2104,8 +2173,22 @@ void processBobfile(string indent, Pkg pkg) {
             }
             break;
 
-        default:
-            error(statement.origin, "Unsupported statement '%s'", statement.rule);
+            case "misc":
+            {
+                foreach (name; statement.targets) {
+                    miscFile(statement.origin,
+                             pkg,
+                             "",
+                             name,
+                             statement.arg1.length == 0 ? "" : statement.arg1[0]);
+                }
+            }
+            break;
+
+            default:
+            {
+                error(statement.origin, "Unsupported statement '%s'", statement.rule);
+            }
         }
     }
 }
