@@ -39,7 +39,6 @@ import core.sys.posix.signal;
 // TODO
 // * Add a mechanism to scrape the names of additional output filenames from
 //   a source file using (say) a regex.
-// * Activate files progressively, and clean out redundant stuff re activation.
 // * Dependence on built generation tools, and using them.
 // * Conditional Bobfile statements.
 // * public-lib rule that auto-copies public headers. A dynamic lib incorporating
@@ -1233,7 +1232,7 @@ final class Pkg : Node {
 //
 class File : Node {
     static File[string]   byPath;       // Files by their path
-    static bool[File]     allActivated; // all activated files
+    static bool[File]     allBuilt;     // all built files
     static bool[File]     outstanding;  // outstanding buildable files
     static int            nextNumber;
 
@@ -1252,7 +1251,6 @@ class File : Node {
     bool       used;                   // true if this file has been used already
 
     // state-machine stuff
-    bool       activated;              // considered by touch() for files with an action
     bool       scanned;                // true if this has already been scanned for includes
     File[]     includes;               // the Files this includes
     bool[File] includedBy;             // Files that include this
@@ -1308,8 +1306,9 @@ class File : Node {
         byPath[path] = this;
 
         if (built) {
-            //say("built file %s", path);
             ++numBuilt;
+            allBuilt[this] = true;
+            outstanding[this] = true;
         }
     }
 
@@ -1435,9 +1434,9 @@ class File : Node {
         if (g_print_details) say("touching %s", path);
         long newest;
 
-        if (activated && action && !action.issued) {
+        if (action && !action.issued) {
             // this item's action may need to be issued
-            //say("activated file %s touched", this);
+            //say("file %s touched", this);
 
             foreach (depend; action.depends) {
                 if (!depend.clean) {
@@ -1528,7 +1527,7 @@ class File : Node {
             other.touch;
         }
         foreach (other; dependedBy.byKey()) {
-            if (other.activated) other.touch;
+            other.touch;
         }
     }
 
@@ -2051,7 +2050,7 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
     }
 }
 
-
+/+
 //
 // Mark all built files in child or referred packages as needed
 //
@@ -2070,7 +2069,7 @@ int markNeeded(Node given) {
         }
         //say("activating %s", file.path);
         file.activated = true;
-        File.allActivated[file] = true;
+        File.allBuilt[file] = true;
         File.outstanding[file] = true;
         qty++;
     }
@@ -2087,6 +2086,7 @@ int markNeeded(Node given) {
 
     return qty;
 }
++/
 
 
 //
@@ -2208,13 +2208,12 @@ void cleandirs() {
 
                 if (!isDir) {
                     File* file = entry.name in File.byPath;
-                    if (file is null || (*file) !in File.allActivated) {
+                    if (file is null || (*file) !in File.allBuilt) {
                         say("Removing unwanted file %s", entry.name);
                         std.file.remove(entry.name);
                     }
                     else {
                         // leaving a file in place
-                        //say("  keeping activated file %s", file.path);
                         dirs[entry.name.dirName] = true;
                     }
                 }
@@ -2299,10 +2298,17 @@ bool doPlanning(int numJobs, bool printStatements, bool printDeps, bool printDet
         auto project = new Pkg(Origin(), root, projectPackage, Privacy.PRIVATE);
         processBobfile("", project);
 
-        // mark all files needed by the project Bobfile as needed, priming the action queue
-        needed = markNeeded(project);
-
+        // clean out unwanted files from the build dir
         cleandirs();
+
+        // Now that we know about all the files and have the mostly-complete
+        // dependency graph (just includes to go), touch all source files, which is
+        // enough to trigger building everything.
+        foreach (path, file; File.byPath) {
+            if (!file.built) {
+                file.touch;
+            }
+        }
     }
     catch (BailException ex) { exiting = true; success = false; }
 
@@ -2365,9 +2371,8 @@ bool doPlanning(int numJobs, bool printStatements, bool printDeps, bool printDet
         say("\n"
             "Total number of files:             %s\n"
             "Number of target files:            %s\n"
-            "Number of activated target files:  %s\n"
             "Number of files updated:           %s\n",
-            File.byPath.length, File.numBuilt, needed, File.numUpdated);
+            File.byPath.length, File.numBuilt, File.numUpdated);
         return true;
     }
     return false;
