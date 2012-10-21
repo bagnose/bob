@@ -1,3 +1,5 @@
+misc transmogrify : bin;
+
 static-lib low : macros.h;
 
 static-lib mid :

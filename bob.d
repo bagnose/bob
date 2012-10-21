@@ -49,6 +49,7 @@ import core.sys.posix.signal;
 // * Allow relative source paths to subdirectories that aren't packages,
 //   (like test/test_one.cpp).
 // * Generation of documentation from the code.
+// * Improve correctness of scanning for imports and includes.
 
 /*
 
@@ -115,7 +116,7 @@ Bob assumes that new packages, libraries, etc
 are mentioned in dependency order. That is, when each thing is
 mentioned, everything it depends on, including dependencies inferred by
 include/import statements in source code, has already been mentioned.
-Exception: a Bobfile can refer to previously-unknown packages.
+Exception: a Bobfile can refer to previously-unknown top-level packages.
 
 The planner scans the Bobfiles, binding files to specific
 locations in the filesystem as it goes, and builds the dependency graph.
@@ -421,15 +422,30 @@ Privacy privacyOf(ref Origin origin, string[] args) {
 bool isScannable(string suffix) {
     string ext = extension(suffix);
     if (ext is null) ext = suffix;
-    bool ret = 
+    return 
         ext == ".c"   ||
         ext == ".h"   ||
         ext == ".cc"  ||
+        ext == ".cxx" ||
         ext == ".cpp" ||
         ext == ".hpp" ||
         ext == ".hh"  ||
         ext == ".d";
-    return ret;
+}
+
+
+//
+// Return true if str starts with any of the given prefixes
+//
+bool startsWith(string str, string[] prefixes) {
+    foreach (prefix; prefixes) {
+        size_t len = prefix.length;
+        if (str.length >= len && str[0..len] == prefix)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 
@@ -880,7 +896,7 @@ final class Action {
     bool    finalised; // true if the action command has been finalised
     bool    issued;    // true if the action has been issued to a worker
 
-    this(ref Origin origin, string name_, string command_, File[] builds_, File[] depends_) {
+    this(ref Origin origin, Pkg pkg, string name_, string command_, File[] builds_, File[] depends_) {
         name     = name_;
         command  = command_;
         number   = nextNumber++;
@@ -891,15 +907,41 @@ final class Action {
         byName[name] = this;
 
         // All the files built by this action depend on the Bobfile
-        File bobfile;
-        foreach (build; builds) {
-            File b = build.bobfile;
-            assert(b !is null);
-            if (bobfile is null) bobfile = b;
-            assert(b is bobfile);
+        depends ~= pkg.bobfile;
+
+        // Recognise in-project tools in the command.
+        foreach (token; split(command)) {
+            if (token.startsWith(["dist/bin", "priv"])) {
+                // Find the tool
+                File *tool = token in File.byPath;
+                errorUnless(tool !is null, origin, "Unknown in-project tool %s", token);
+
+                // Is the tool already involved in this action?
+                bool involved;
+                foreach (file; chain(builds, depends)) {
+                    if (file is *tool) {
+                        involved = true;
+                    }
+                }
+
+                if (!involved) {
+                    // Verify that these built files can refer to it.
+                    foreach (file; builds) {
+                        if (!is(typeof(file.parent) : Pkg) &&
+                            !file.parent.allowsRefTo(origin, *tool))
+                        {
+                            // Add enabling reference from parent to tool
+                            file.parent.addReference(origin, *tool);
+                        }
+                        // Add reference to tool
+                        file.addReference(origin, *tool);
+                    }
+
+                    // Add the dependency.
+                    depends ~= *tool;
+                }
+            }
         }
-        assert(bobfile !is null);
-        depends ~= bobfile;
 
         // set up reverse dependencies between builds and depends
         foreach (depend; depends) {
@@ -939,6 +981,7 @@ final class Action {
         assert(!issued);
         finalised = true;
 
+        // Local function to expand variables in a string.
         string resolve(string text) {
             string result;
 
@@ -947,7 +990,7 @@ final class Action {
             char   prev;
             string prefix, varname, suffix;
 
-            // Local function to finish processing a token
+            // Local function to finish processing a token.
             void finishToken(size_t pos) {
                 suffix = text[anchor..pos];
                 size_t start = result.length;
@@ -1163,11 +1206,11 @@ class Node {
 
     // return true if other is a visible-child or reference of this,
     // or is a visible-descendant of them
-    private bool allowsRefTo(ref Origin origin,
-                             Node       other,
-                             size_t     depth        = 0,
-                             Privacy    allowPrivacy = Privacy.PROTECTED,
-                             bool[Node] checked      = null) {
+    bool allowsRefTo(ref Origin origin,
+                     Node       other,
+                     size_t     depth        = 0,
+                     Privacy    allowPrivacy = Privacy.PROTECTED,
+                     bool[Node] checked      = null) {
         errorUnless(depth < 100, origin, "circular reference involving %s referring to %s", this, other);
         //say("for %s: checking if %s allowsReferenceTo %s", origin.path, this, other);
         if (other is this || other.isVisibleDescendantOf(this, allowPrivacy)) {
@@ -1619,7 +1662,7 @@ abstract class Binary : File {
 
                 string actionName = format("%-15s %s", "Compile", sourceFile.path);
 
-                obj.action = new Action(origin, actionName, compile.command, [obj], [sourceFile]);
+                obj.action = new Action(origin, pkg, actionName, compile.command, [obj], [sourceFile]);
             }
             else if (generate) {
                 // Generate more source files from sourceFile.
@@ -1635,6 +1678,7 @@ abstract class Binary : File {
                     suffixes ~= suffix ~ " ";
                 }
                 Action action = new Action(origin,
+                                           pkg,
                                            format("%-15s %s", ext ~ "->" ~ suffixes, sourceFile.path),
                                            generate.command,
                                            files,
@@ -1719,12 +1763,12 @@ final class StaticLib : Binary {
           LinkCommand *linkCommand = sourceExt in linkCommands;
           errorUnless(linkCommand && linkCommand.staticLib.length, origin,
                       "No link command for static lib from '%s'", sourceExt);
-          action = new Action(origin, actionName,
+          action = new Action(origin, pkg, actionName,
                               linkCommand.staticLib, [this], objs);
         }
         else {
           // A place-holder file to fit in with dependency tracking
-          action = new Action(origin, actionName, "DUMMY", [this], []);
+          action = new Action(origin, pkg, actionName, "DUMMY", [this], []);
         }
     }
 }
@@ -1868,7 +1912,7 @@ final class DynamicLib : File {
                 objs ~= obj;
             }
         }
-        action = new Action(origin, actionName, linkCommand.dynamicLib, [this], objs);
+        action = new Action(origin, pkg, actionName, linkCommand.dynamicLib, [this], objs);
     }
 
 
@@ -1937,12 +1981,13 @@ final class Exe : Binary {
         errorUnless(linkCommand && linkCommand.executable != null, origin,
                     "No command to link and executable from sources of extension %s", sourceExt);
 
-        action = new Action(origin, format("%-15s %s", desc, dest), linkCommand.executable, [this], objs);
+        action = new Action(origin, pkg, format("%-15s %s", desc, dest), linkCommand.executable, [this], objs);
 
         if (kind == "test-exe") {
             File result = new File(origin, pkg, name ~ "-result",
                                    Privacy.PRIVATE, dest ~ "-passed", false, true);
             result.action = new Action(origin,
+                                       pkg,
                                        format("%-15s %s", "TestResult", result.path),
                                        format("TEST %s", this.path),
                                        [result],
@@ -2017,10 +2062,11 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
         if (generate is null) {
             // Target is a simple copy of source file,
             // set to executable if dest is bin.
-            File destFile = new File(origin, pkg, relName ~ "-copy", Privacy.PRIVATE,
+            File destFile = new File(origin, pkg, relName ~ "-copy", Privacy.PUBLIC,
                                      buildPath(destDir, name), false, true);
             string extra = dest == "bin" ? format(" && chmod +x %s", destFile.path) : "";
             destFile.action = new Action(origin,
+                                         pkg,
                                          format("%-15s %s", "Copy", destFile.path),
                                          format("cp %s %s%s", sourceFile.path, destFile.path, extra),
                                          [destFile],
@@ -2039,6 +2085,7 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
             }
             errorUnless(files.length > 0, origin, "Must have at least one destination suffix");
             Action action = new Action(origin,
+                                       pkg,
                                        format("%-15s %s", ext ~ "->" ~ suffixes, sourceFile.path),
                                        generate.command,
                                        files,
@@ -2049,44 +2096,6 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
         }
     }
 }
-
-/+
-//
-// Mark all built files in child or referred packages as needed
-//
-int markNeeded(Node given) {
-    static bool[Node] done;
-
-    int qty = 0;
-    if (given in done) return qty;
-    done[given] = true;
-
-    File file = cast(File) given;
-    if (file && file.built) {
-        // activate this file
-        if (file.action is null) {
-            fatal("file %s activated before its action was set", file);
-        }
-        //say("activating %s", file.path);
-        file.activated = true;
-        File.allBuilt[file] = true;
-        File.outstanding[file] = true;
-        qty++;
-    }
-
-    // recurse into child and referred nodes
-    foreach (child; chain(given.children, given.refers)) {
-        qty += markNeeded(child);
-    }
-
-    if (file) {
-        // touch this file to trigger building
-        file.touch;
-    }
-
-    return qty;
-}
-+/
 
 
 //
