@@ -36,20 +36,21 @@ import std.exception;
 import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
-// TODO
+// TODO - high priority
+// * Allow C/C++ #include statements to omit any number of trail directories
+//   starting from the top, provided that the specified file is still unique.
+//   Enable this via a bob command-line switch, because it is NOT preferred.
+//
+// TODO - lower priority
+// * Conditional Bobfile statements.
 // * Add a mechanism to scrape the names of additional output filenames from
 //   a source file using (say) a regex.
-// * Dependence on built generation tools, and using them.
-// * Conditional Bobfile statements.
+// * Generation of documentation from the code.
 // * public-lib rule that auto-copies public headers. A dynamic lib incorporating
 //   a public static lib has to only contain public static libs. A public-lib
 //   that is not incorporated into a dynamic lib is also copied into dist/lib.
-// * Treat include files in C_EXTERN directories as system includes,
-//   even if in double-quotes.
-// * Allow relative source paths to subdirectories that aren't packages,
-//   (like test/test_one.cpp).
-// * Generation of documentation from the code.
 // * Improve correctness of scanning for imports and includes.
+// * Support code coverage analysis for test-exe.
 
 /*
 
@@ -586,6 +587,8 @@ Include[] scanForIncludes(string path) {
 
     enum Phase { START, HASH, WORD, INCLUDE, QUOTE, NEXT }
 
+    string[] externals = split(getOption("C_EXTERN"));
+
     if (exists(path) && isFile(path)) {
         string content = readText(path);
         int anchor = 0;
@@ -633,7 +636,20 @@ Include[] scanForIncludes(string path) {
                     break;
                 case Phase.QUOTE:
                     if (ch == '"') {
-                        result ~= Include(content[anchor..i].idup, origin.line);
+                        bool ignored = false;
+                        foreach (external; externals) {
+                            string ignoreStr = external ~ dirSeparator;
+                            if (content.length >= anchor+ignoreStr.length &&
+                                content[anchor..anchor+ignoreStr.length] == ignoreStr)
+                            {
+                                ignored = true;
+                                break;
+                            }
+                        }
+
+                        if (!ignored) {
+                            result ~= Include(content[anchor..i].idup, origin.line);
+                        }
                         phase = Phase.NEXT;
                     }
                     break;
@@ -719,7 +735,9 @@ Include[] scanForImports(string path) {
                 bool ignored = false;
                 foreach (external; externals) {
                     string ignoreStr = external ~ dirSeparator;
-                    if (trail.length >= ignoreStr.length && trail[0..ignoreStr.length] == ignoreStr) {
+                    if (trail.length >= ignoreStr.length &&
+                        trail[0..ignoreStr.length] == ignoreStr)
+                    {
                         ignored = true;
                         break;
                     }
@@ -877,6 +895,7 @@ Statement[] readBobfile(string path) {
 bool g_print_rules;
 bool g_print_deps;
 bool g_print_details;
+bool g_short_trails;
 
 
 //
@@ -1423,7 +1442,10 @@ class File : Node {
                     include = buildPath("obj", entry.trail) in byPath;
                 }
                 Origin origin = Origin(this.path, entry.line);
-                errorUnless(include !is null, origin, "included/imported unknown file %s", entry.trail);
+                errorUnless(include !is null,
+                            origin,
+                            "included/imported unknown file %s",
+                            entry.trail);
 
                 // add the included file to this file's includes
                 includes ~= *include;
@@ -1432,7 +1454,7 @@ class File : Node {
                 // tell all files that depend on this one that the include has been added
                 includeAdded(origin, this, *include);
 
-                // now (after includeAdded) we can add a reference between this file and the included one
+                // now (after includeAdded) add a reference between this file and the included one
                 //say("adding include-reference from %s to %s", this, *include);
                 addReference(origin, *include);
             }
@@ -2248,7 +2270,11 @@ void cleandirs() {
 //
 // Planner function
 //
-bool doPlanning(int numJobs, bool printStatements, bool printDeps, bool printDetails) {
+bool doPlanning(int numJobs,
+                bool printStatements,
+                bool printDeps,
+                bool printDetails,
+                bool shortTrails) {
 
     // state variables
     size_t       inflight;
@@ -2296,6 +2322,7 @@ bool doPlanning(int numJobs, bool printStatements, bool printDeps, bool printDet
     g_print_rules   = printStatements;
     g_print_deps    = printDeps;
     g_print_details = printDetails;
+    g_short_trails  = shortTrails;
 
     string projectPackage = getOption("PROJECT");
     errorUnless(projectPackage.length > 0, Origin(), "No project directory specified");
@@ -2530,6 +2557,7 @@ int main(string[] args) {
         bool printDeps       = false;
         bool printDetails    = false;
         bool printActions    = false;
+        bool shortTrails     = false;
         bool help            = false;
         uint numJobs         = 1;
 
@@ -2537,12 +2565,13 @@ int main(string[] args) {
         try {
             getopt(args,
                    std.getopt.config.caseSensitive,
-                   "statements|s", &printStatements,
-                   "deps|d",       &printDeps,
-                   "details|v",    &printDetails,
-                   "actions|a",    &printActions,
-                   "jobs|j",       &numJobs,
-                   "help|h",       &help);
+                   "statements|s",   &printStatements,
+                   "deps|d",         &printDeps,
+                   "details|v",      &printDetails,
+                   "actions|a",      &printActions,
+                   "short-trails|t", &shortTrails,
+                   "jobs|j",         &numJobs,
+                   "help|h",         &help);
         }
         catch (std.conv.ConvException ex) {
             returnValue = 2;
@@ -2602,7 +2631,11 @@ int main(string[] args) {
         }
 
         // build everything
-        returnValue = doPlanning(numJobs, printStatements, printDeps, printDetails) ? 0 : 1;
+        returnValue = doPlanning(numJobs,
+                                 printStatements,
+                                 printDeps,
+                                 printDetails,
+                                 shortTrails) ? 0 : 1;
 
         return returnValue;
     }
