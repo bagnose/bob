@@ -17,11 +17,12 @@
  * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+import process; // Local copy of new std.process, which is not yet available.
+
 import std.stdio;
 import std.ascii;
 import std.string;
 import std.format;
-import std.process;
 import std.algorithm;
 import std.range;
 import std.file;
@@ -33,15 +34,10 @@ import std.concurrency;
 import std.functional;
 import std.exception;
 
-import core.sys.posix.sys.wait;
 import core.sys.posix.signal;
 
-// TODO - high priority
-// * Allow C/C++ #include statements to omit any number of trail directories
-//   starting from the top, provided that the specified file is still unique.
-//   Enable this via a bob command-line switch, because it is NOT preferred.
-//
-// TODO - lower priority
+// TODO:
+// * Add support for ms-windows.
 // * Conditional Bobfile statements.
 // * Add a mechanism to scrape the names of additional output filenames from
 //   a source file using (say) a regex.
@@ -251,25 +247,24 @@ class BailException : Exception {
 synchronized class Launcher {
     private {
         bool      bailed;
-        bool[int] children;
+        bool[Pid] children;
     }
 
     // launch a process if we haven't bailed
-    pid_t launch(string command) {
+    Pid launch(string command, string results) {
         if (bailed) {
             say("Aborting launch because we have bailed");
             throw new BailException();
         }
-        int child = spawnvp(P_NOWAIT, "/bin/bash", ["bash", "-c", command]);
-        //say("spawned child, pid=%s", child);
+        auto resultsFile = std.stdio.File(results, "w");
+        Pid child = spawnProcess(command, std.stdio.stdin, resultsFile, resultsFile);
         children[child] = true;
         return child;
     }
 
     // a child has been finished with
-    void completed(pid_t child) {
+    void completed(Pid child) {
         children.remove(child);
-        //say("completed child, pid=%s", child);
     }
 
     // bail, doing nothing if we had already bailed
@@ -277,7 +272,7 @@ synchronized class Launcher {
         if (!bailed) {
             bailed = true;
             foreach (child; children.byKey) {
-                kill(child, SIGTERM);
+                kill(child.processID, SIGTERM);
             }
             return false;
         }
@@ -895,7 +890,6 @@ Statement[] readBobfile(string path) {
 bool g_print_rules;
 bool g_print_deps;
 bool g_print_details;
-bool g_short_trails;
 
 
 //
@@ -1166,8 +1160,8 @@ enum Privacy { PUBLIC,           // no additional constraint
 class Node {
     static Node[string] byTrail;
 
-    string  name;  // simple name this node adds to parent
-    string  trail; // slash-separated name components from root to this
+    string  name;    // simple name this node adds to parent
+    string  trail;   // slash-separated name components from after-root to this
     Node    parent;
     Privacy privacy;
     Node[]  children;
@@ -1261,12 +1255,24 @@ class Node {
     // * Nodes whose selves or ancestors have not been referred to by our parent.
     // Also can't explicitly refer to children - you get that implicitly.
     final void addReference(ref Origin origin, Node other, string cause = null) {
-        errorUnless(other !is null,                         origin, "%s cannot refer to NULL node", this);
-        errorUnless(other != this,                          origin, "%s cannot refer to self", this);
-        errorUnless(!this.isDescendantOf(other),            origin, "%s cannot refer to ancestor %s", this, other);
-        errorUnless(!other.isDescendantOf(this),            origin, "%s cannnot explicitly refer to descendant %s", this, other);
-        errorUnless(this.parent.allowsRefTo(origin, other), origin, "Parent %s does not allow %s to refer to %s", parent, this, other);
-        errorUnless(!other.allowsRefTo(origin, this),       origin, "%s cannot refer to %s because of a circularity", this, other);
+        errorUnless(other !is null,
+                    origin, "%s cannot refer to NULL node", this);
+
+        errorUnless(other != this,
+                    origin, "%s cannot refer to self", this);
+
+        errorUnless(!this.isDescendantOf(other),
+                    origin, "%s cannot refer to ancestor %s", this, other);
+
+        errorUnless(!other.isDescendantOf(this),
+                    origin, "%s cannnot explicitly refer to descendant %s", this, other);
+
+        errorUnless(this.parent.allowsRefTo(origin, other),
+                    origin, "Parent %s does not allow %s to refer to %s", parent, this, other);
+
+        errorUnless(!other.allowsRefTo(origin, this),
+                    origin, "%s cannot refer to %s because of a circularity", this, other);
+
         if (g_print_deps) say("%s refers to %s%s", this, other, cause);
         refers ~= other;
     }
@@ -1337,20 +1343,6 @@ class File : Node {
         assert(0);
     }
 
-    // return the bobfile that this file is declared in
-    final File bobfile() {
-        Node node = parent;
-        while (node) {
-            Pkg pkg = cast(Pkg) node;
-            if (pkg) {
-                return pkg.bobfile;
-            }
-            node = node.parent;
-        }
-        fatal("file %s has no package in its ancestry", this);
-        assert(0);
-    }
-
     this(ref Origin origin, Node parent_, string name_, Privacy privacy_, string path_,
          bool scannable_, bool built_)
     {
@@ -1411,8 +1403,8 @@ class File : Node {
         touch;
     }
 
-    // Scan this file for includes/imports, returning them after making sure those files
-    // themselves exist and have already been scanned for includes
+    // Scan this file for includes/imports, incorporating them into the
+    // dependency graph.
     private void scan() {
         errorUnless(!scanned, Origin(path, 1), "%s has been scanned for includes twice!", this);
         scanned = true;
@@ -1432,16 +1424,17 @@ class File : Node {
             }
 
             foreach (entry; entries) {
+                Origin origin = Origin(this.path, entry.line);
+
                 // verify that we know the included file
 
                 File * file;
-                // under src using full trail?
+                // under src?
                 File * include = buildPath("src", entry.trail) in byPath;
                 if (include is null) {
                     // under obj?
                     include = buildPath("obj", entry.trail) in byPath;
                 }
-                Origin origin = Origin(this.path, entry.line);
                 errorUnless(include !is null,
                             origin,
                             "included/imported unknown file %s",
@@ -1466,7 +1459,6 @@ class File : Node {
             }
         }
     }
-
 
     // An include has been added from includer (which we depend on) to included.
     // Specialisations of File override this to infer additional depends.
@@ -2086,11 +2078,10 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
             // set to executable if dest is bin.
             File destFile = new File(origin, pkg, relName ~ "-copy", Privacy.PUBLIC,
                                      buildPath(destDir, name), false, true);
-            string extra = dest == "bin" ? format(" && chmod +x %s", destFile.path) : "";
             destFile.action = new Action(origin,
                                          pkg,
                                          format("%-15s %s", "Copy", destFile.path),
-                                         format("cp %s %s%s", sourceFile.path, destFile.path, extra),
+                                         format("cp %s %s", sourceFile.path, destFile.path),
                                          [destFile],
                                          [sourceFile]);
         }
@@ -2273,8 +2264,7 @@ void cleandirs() {
 bool doPlanning(int numJobs,
                 bool printStatements,
                 bool printDeps,
-                bool printDetails,
-                bool shortTrails) {
+                bool printDetails) {
 
     // state variables
     size_t       inflight;
@@ -2322,7 +2312,6 @@ bool doPlanning(int numJobs,
     g_print_rules   = printStatements;
     g_print_deps    = printDeps;
     g_print_details = printDetails;
-    g_short_trails  = shortTrails;
 
     string projectPackage = getOption("PROJECT");
     errorUnless(projectPackage.length > 0, Origin(), "No project directory specified");
@@ -2426,8 +2415,8 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
     std.concurrency.register(myName, thisTid);
 
     void perform(string action, string command, string targets) {
-        if (printActions) { say("\n%s\n", command); }
         say("%s", action);
+        if (printActions) { say("\n%s\n", command); }
 
         success = false;
         string results = buildPath("tmp", myName);
@@ -2449,43 +2438,27 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             if (exists(tmpPath)) {
                 rmdirRecurse(tmpPath);
             }
-            command = "TMP_PATH=" ~ tmpPath ~ " " ~ command[5..$];
+            command = command[5..$] ~ " --tmp=" ~ tmpPath;
         }
-
-        // launch child process to do the action
-        string str = command ~ " >" ~ results ~ " 2>&1";
-        pid_t child = launcher.launch(str);
-
-        // wait for it to complete
-        for (;;) {
-            int status;
-            pid_t wpid = core.sys.posix.sys.wait.waitpid(child, &status, 0);
-            if (wpid == -1) {
-                // error, possibly a signal - treat as failure
-                break;
-            }
-            else if (wpid == 0) {
-                // non-blocking return, which should not happen - treat as failure
-                break;
-            }
-            else if ((status & 0x7f) == 0) {
-                // child has terminated - might be success
-                success = ((status & 0xff00) >> 8) == 0;
-                break;
-            }
-            else {
-                // child state has changed in some way other than termination - treat as failure
-                break;
-            }
-        }
-        launcher.completed(child);
 
         string[] targs = split(targets, "|");
+
+        // delete any pre-existing files that we are about to build
+        foreach (target; targs) {
+            if (exists(target)) {
+                std.file.remove(target);
+            }
+        }
+
+        // launch child process to do the action, then wait for it to complete
+        Pid pid = launcher.launch(command, results);
+        success = wait(pid) == 0;
+        launcher.completed(pid);
 
         if (!success) {
             bool bailed = launcher.bail;
 
-            // delete built files
+            // delete built files so the failure is tidy
             foreach (target; targs) {
                 if (exists(target)) {
                     say("  Deleting %s", target);
@@ -2557,7 +2530,6 @@ int main(string[] args) {
         bool printDeps       = false;
         bool printDetails    = false;
         bool printActions    = false;
-        bool shortTrails     = false;
         bool help            = false;
         uint numJobs         = 1;
 
@@ -2569,7 +2541,6 @@ int main(string[] args) {
                    "deps|d",         &printDeps,
                    "details|v",      &printDetails,
                    "actions|a",      &printActions,
-                   "short-trails|t", &shortTrails,
                    "jobs|j",         &numJobs,
                    "help|h",         &help);
         }
@@ -2619,7 +2590,7 @@ int main(string[] args) {
                     if (tokens[1][0] == '"') {
                         tokens[1] = tokens[1][1..$-1];
                     }
-                    setenv(tokens[0], tokens[1], true);
+                    environment[tokens[0]] = tokens[1];
                 }
             }
         }
@@ -2634,8 +2605,7 @@ int main(string[] args) {
         returnValue = doPlanning(numJobs,
                                  printStatements,
                                  printDeps,
-                                 printDetails,
-                                 shortTrails) ? 0 : 1;
+                                 printDetails) ? 0 : 1;
 
         return returnValue;
     }
