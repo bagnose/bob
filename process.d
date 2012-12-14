@@ -386,15 +386,17 @@ version(Posix) private Pid spawnProcessImpl
     (string name, const string[] args, const char** envz,
     File stdin_, File stdout_, File stderr_, Config config)
 {
+    string fullName = name;
+
     // Make sure the file exists and is executable.
     if (any!isDirSeparator(name))
     {
-        enforce(isExecutable(name), "Not an executable file: "~name);
+        enforce(isExecutable(fullName), "Not an executable file: "~name);
     }
     else
     {
-        name = searchPathFor(name);
-        enforce(name != null, "Executable file not found: "~name);
+        fullName = searchPathFor(name);
+        enforce(fullName != null, "Executable file not found: "~name);
     }
 
     // Get the file descriptors of the streams.
@@ -429,7 +431,7 @@ version(Posix) private Pid spawnProcessImpl
         if (stderrFD > STDERR_FILENO)  close(stderrFD);
 
         // Execute program
-        execve(toStringz(name), toArgz(name, args), envz);
+        execve(toStringz(fullName), toArgz(fullName, args), envz);
 
         // If execution fails, exit as quick as possible.
         perror("spawnProcess(): Failed to execute program");

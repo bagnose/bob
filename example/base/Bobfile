@@ -3,12 +3,10 @@ misc transmogrify : bin;
 static-lib low : macros.h;
 
 static-lib mid :
-                  one.h two.H
-                :
-                  one.c two.CPP
-                :
-                  pthread m
-                ;
+                one.h two.H
+               :
+                one.c two.CPP
+               ;
 
 test-exe test-one : test_one.cpp;
 test-exe test-two : test_two.cpp;

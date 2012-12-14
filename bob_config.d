@@ -57,9 +57,17 @@ private void setMode(string path, uint mode) {
 }
 
 
+//
+// Storage for data read from the config file
+//
 alias string[][string] Vars;
 
+
+//
+// Enum to control how to append to variables
+//
 enum AppendType { notExist, mustExist, mayExist}
+
 
 //
 // Append some tokens to the named element in vars,
@@ -128,7 +136,6 @@ string[] fromEnv(string varname) {
 }
 
 
-
 //
 // Write content to path if it doesn't already match, creating the file
 // if it doesn't already exist. The file's executable flag is set to the
@@ -149,7 +156,6 @@ void update(string path, string content, bool executable) {
         chmod(toStringz(path), mode);
     }
 }
-
 
 
 //================================================================
@@ -316,7 +322,7 @@ void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
 //
 Vars parseConfig(string configFile, string mode) {
 
-    enum Section { none, defines, modes }
+    enum Section { none, defines, modes, syslibs }
 
     Section section = Section.none;
     bool    inMode;
@@ -371,6 +377,14 @@ Vars parseConfig(string configFile, string mode) {
                     if (tokens.length == 2) {
                         vars.append(strip(tokens[0]), split(tokens[1]), AppendType.mustExist);
                     }
+                }
+            }
+
+            else if (section == Section.syslibs) {
+                string[] tokens = split(line, " =");
+                if (tokens.length == 2) {
+                    // Define a new variable.
+                    vars.append("syslib " ~ strip(tokens[0]), split(tokens[1]), AppendType.notExist);
                 }
             }
         }
@@ -428,6 +442,7 @@ int main(string[] args) {
     //
 
     Vars vars = parseConfig(configFile, mode);
+    vars["SRCDIR"] = [srcDir];
     establishBuildDir(buildDir, srcDir, vars);
 
     return 0;

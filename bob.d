@@ -1,7 +1,7 @@
 /**
  * Copyright 2012, Graham St Jack.
  *
- * This file is part of bob, a software build tool. 
+ * This file is part of bob, a software build tool.
  *
  * Bob is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,7 +37,8 @@ import std.exception;
 import core.sys.posix.signal;
 
 // TODO:
-// * Add support for ms-windows.
+// * Work out a way to pass a temp directory to test exes.
+// * Rewrite signal handling code and sort out thread shutdown issues.
 // * Conditional Bobfile statements.
 // * Add a mechanism to scrape the names of additional output filenames from
 //   a source file using (say) a regex.
@@ -251,13 +252,13 @@ synchronized class Launcher {
     }
 
     // launch a process if we haven't bailed
-    Pid launch(string command, string results) {
+    Pid launch(string command, string resultsPath) {
         if (bailed) {
             say("Aborting launch because we have bailed");
             throw new BailException();
         }
-        auto resultsFile = std.stdio.File(results, "w");
-        Pid child = spawnProcess(command, std.stdio.stdin, resultsFile, resultsFile);
+        auto resultsFile = std.stdio.File(resultsPath, "w");
+        Pid child = spawnProcess(command, stdin, resultsFile, resultsFile);
         children[child] = true;
         return child;
     }
@@ -418,7 +419,7 @@ Privacy privacyOf(ref Origin origin, string[] args) {
 bool isScannable(string suffix) {
     string ext = extension(suffix);
     if (ext is null) ext = suffix;
-    return 
+    return
         ext == ".c"   ||
         ext == ".h"   ||
         ext == ".cc"  ||
@@ -541,6 +542,10 @@ void readOptions() {
                     generateCommands[input] = GenerateCommand(outputs, value);
                 }
             }
+            else if (key.length > 7 && key[0..7] == "syslib ") {
+                // syslib declaration
+                SysLib.create(split(key[7..$]), split(value));
+            }
             else {
                 // A variable
                 options[key] = value;
@@ -574,15 +579,14 @@ string getOption(string key) {
 struct Include {
     string trail;
     uint   line;
+    bool   quoted;
 }
 
 Include[] scanForIncludes(string path) {
     Include[] result;
     Origin origin = Origin(path, 1);
 
-    enum Phase { START, HASH, WORD, INCLUDE, QUOTE, NEXT }
-
-    string[] externals = split(getOption("C_EXTERN"));
+    enum Phase { START, HASH, WORD, INCLUDE, QUOTE, ANGLE, NEXT }
 
     if (exists(path) && isFile(path)) {
         string content = readText(path);
@@ -625,26 +629,31 @@ Include[] scanForIncludes(string path) {
                         phase = Phase.QUOTE;
                         anchor = i+1;
                     }
-                    else if (!isWhite(ch)) {
+                    else if (ch == '<') {
+                        phase = Phase.ANGLE;
+                        anchor = i+1;
+                    }
+                    else if (isWhite(ch)) {
                         phase = Phase.NEXT;
                     }
                     break;
                 case Phase.QUOTE:
                     if (ch == '"') {
-                        bool ignored = false;
-                        foreach (external; externals) {
-                            string ignoreStr = external ~ dirSeparator;
-                            if (content.length >= anchor+ignoreStr.length &&
-                                content[anchor..anchor+ignoreStr.length] == ignoreStr)
-                            {
-                                ignored = true;
-                                break;
-                            }
-                        }
-
-                        if (!ignored) {
-                            result ~= Include(content[anchor..i].idup, origin.line);
-                        }
+                        result ~= Include(content[anchor..i].idup, origin.line, true);
+                        phase = Phase.NEXT;
+                        //say("%s: found quoted include of %s", path, content[anchor..i]);
+                    }
+                    else if (isWhite(ch)) {
+                        phase = Phase.NEXT;
+                    }
+                    break;
+                case Phase.ANGLE:
+                    if (ch == '>') {
+                        result ~= Include(content[anchor..i].idup, origin.line, false);
+                        phase = Phase.NEXT;
+                        //say("%s: found system include of %s", path, content[anchor..i]);
+                    }
+                    else if (isWhite(ch)) {
                         phase = Phase.NEXT;
                     }
                     break;
@@ -683,7 +692,7 @@ Include[] scanForImports(string path) {
     int anchor, line=1;
     bool inWord, inImport, ignoring;
 
-    string[] externals = split(getOption("D_EXTERN"));
+    string[] externals = [ "core", "std" ];
 
     foreach (int pos, char ch; content) {
         if (ch == '\n') {
@@ -739,7 +748,7 @@ Include[] scanForImports(string path) {
                 }
 
                 if (!ignored) {
-                    result ~= Include(trail, line);
+                    result ~= Include(trail, line, true);
                 }
                 word = null;
 
@@ -985,7 +994,7 @@ final class Action {
     // replaced with the content of the named variable, cross-multiplied with
     // any adjacent text.
     // Special variables are:
-    //   INPUT    -> Paths of the input files. 
+    //   INPUT    -> Paths of the input files.
     //   OUTPUT   -> Paths of the built files.
     //   PROJ_INC -> Paths of project include/import dirs relative to build dir.
     //   PROJ_LIB -> Paths of project library dirs relative to build dir.
@@ -1057,7 +1066,7 @@ final class Action {
             }
 
             foreach (pos, ch; text) {
-                if (!inToken && !isWhite(ch)) { 
+                if (!inToken && !isWhite(ch)) {
                     // Starting a token
                     inToken = true;
                     anchor  = pos;
@@ -1118,22 +1127,38 @@ final class Action {
 //
 // SysLib - represents a library outside the project.
 //
+// It is automatically required by an in-project shared library or exe
+// if any of its outside-the-project headers are imported/included.
+//
 final class SysLib {
-    static SysLib[string] byName;
-    static int            nextNumber;
+    static SysLib[string]   byName;
+    static SysLib[][string] byHeader;
+    static int              nextNumber;
 
     string name;
     int    number;
 
-    // assorted Object overrides for printing and use as an associative-array key
-    override string toString() const {
-        return name;
+    static create(string[] libNames, string[] headers) {
+        SysLib[] libs;
+        foreach (name; libNames) {
+            libs ~= new SysLib(name);
+        }
+        foreach (header; headers) {
+            if (header in byHeader) {
+                fatal("System header %s used in multiple syslib variables", header);
+            }
+            byHeader[header] = libs;
+        }
     }
 
-    this(string name_) {
+    private this(string name_) {
         name         = name_;
         number       = nextNumber++;
         byName[name] = this;
+    }
+
+    override string toString() const {
+        return name;
     }
 
     override int opCmp(Object o) const {
@@ -1410,7 +1435,7 @@ class File : Node {
         scanned = true;
         if (scannable) {
 
-            // scan for includes that are part of the project, and thus must already be known
+            // scan for includes
             Include[] entries;
             string ext = extension(path);
             if (ext == ".c" || ext == ".cc" || ext == ".cpp" || ext == ".h") {
@@ -1426,14 +1451,28 @@ class File : Node {
             foreach (entry; entries) {
                 Origin origin = Origin(this.path, entry.line);
 
-                // verify that we know the included file
+                // try to find the included file within the project or in the known system headers
 
-                File * file;
+                File *file;
                 // under src?
-                File * include = buildPath("src", entry.trail) in byPath;
+                File *include = buildPath("src", entry.trail) in byPath;
                 if (include is null) {
                     // under obj?
                     include = buildPath("obj", entry.trail) in byPath;
+                }
+                if (include is null) {
+                    // Last chance - it might be a known system header.
+                    if (entry.trail in SysLib.byHeader) {
+                        // known system header - tell containers about it so they can pick up SysLibs
+                        //say("included external header %s", entry.trail);
+                        systemHeaderIncluded(origin, this, entry.trail);
+                        continue;
+                    }
+                    else if (!entry.quoted) {
+                        // Ignore unknown system includes, hoping they are from std libs
+                        //say("ignoring unknown system header %s, hoping it is a for a standard lib", entry.trail);
+                        continue;
+                    }
                 }
                 errorUnless(include !is null,
                             origin,
@@ -1444,14 +1483,14 @@ class File : Node {
                 includes ~= *include;
                 include.includedBy[this] = true;
 
-                // tell all files that depend on this one that the include has been added
+                // tell all files that depend on this one that the include has been added,
+                // so that references between libraries can be established.
+                if (g_print_deps) say("%s includes/imports %s", this.path, include.path);
                 includeAdded(origin, this, *include);
 
                 // now (after includeAdded) add a reference between this file and the included one
-                //say("adding include-reference from %s to %s", this, *include);
                 addReference(origin, *include);
             }
-            if (g_print_deps && includes) say("%s includes=%s", this, includes);
 
             // totally important to touch includes AFTER we know what all of them are
             foreach (include; includes) {
@@ -1460,13 +1499,19 @@ class File : Node {
         }
     }
 
-    // An include has been added from includer (which we depend on) to included.
-    // Specialisations of File override this to infer additional depends.
+    // An include has been added from includer (which is this or a file this depends on) to included.
+    // Specialisations of File override to infer additional depends.
     void includeAdded(ref Origin origin, File includer, File included) {
-        //say("File.includeAdded called on %s with %s including %s", this, includer, included);
         foreach (depend; dependedBy.keys()) {
-            //say("  passing on to %s", depend);
             depend.includeAdded(origin, includer, included);
+        }
+    }
+
+    // A system header has been included by includer (which is this or a file this depends on).
+    // Specialisations of File override to inder linking to SysLibs.
+    void systemHeaderIncluded(ref Origin origin, File includer, string included) {
+        foreach (depend; dependedBy.keys()) {
+            depend.systemHeaderIncluded(origin, includer, included);
         }
     }
 
@@ -1630,20 +1675,9 @@ abstract class Binary : File {
     // The sources may be already-known built files or source files in the repo,
     // but can't already be used by another Binary.
     this(ref Origin origin, Pkg pkg, string name_, string path_,
-         string[] publicSources, string[] protectedSources, string[] sysLibs) {
+         string[] publicSources, string[] protectedSources) {
 
         super(origin, pkg, name_, Privacy.PUBLIC, path_, false, true);
-
-        // required system libraries
-        foreach (sys; sysLibs) {
-            if (sys !in SysLib.byName) {
-                new SysLib(sys);
-            }
-            SysLib lib = SysLib.byName[sys];
-            if (lib !in reqSysLibs) {
-                reqSysLibs[lib] = true;
-            }
-        }
 
         // Local function to add a source file to this Binary
         void addSource(string name, Privacy privacy) {
@@ -1654,6 +1688,8 @@ abstract class Binary : File {
 
             errorUnless(sourceFile !in byContent, origin, "%s already used", sourceFile.path);
             byContent[sourceFile] = this;
+
+            if (g_print_deps) say("%s contains %s", this.path, sourceFile.path);
 
             // Look for a command to do something with the source file.
 
@@ -1726,25 +1762,42 @@ abstract class Binary : File {
 
     override void includeAdded(ref Origin origin, File includer, File included) {
         // A file we depend on (includer) has included another file (included).
-        // If this means that this 'needs' another Binary, remember the fact and
-        // also add a dependency on that other Binary. Note that the dependency
+        // If this means that this 'needs' another Binary, remember the fact
+        // and also add a dependency on that other Binary. Note that the dependency
         // is often not 'real' (a StaticLib doesn't actually depend on other StaticLibs),
         // but it is a very useful simplification when working out which libraries an
         // Exe depends on.
-        //say("%s: %s includes %s", this.path, includer.path, included.path);
+        if (g_print_deps) say("%s: %s includes %s", this.path, includer.path, included.path);
         if (includer in byContent && byContent[includer] is this) {
-            Binary * container = included in byContent;
+            Binary *container = included in byContent;
             errorUnless(container !is null, origin, "included file is not contained in a library");
             if (*container !is this && *container !in reqBinaries) {
 
                 // we require the container of the included file
+                if (g_print_deps) say("%s requires %s", this.path, container.path);
                 reqBinaries[*container] = true;
 
                 // add a dependancy and a reference
-                addReference(origin, *container, format(" because %s includes %s",
-                                                        includer.path, included.path));
+                addReference(origin, *container,
+                             format(" because %s includes %s", includer.path, included.path));
                 action.addDependency(*container);
-                //say("%s requires %s", this.path, container.path);
+                if (g_print_deps) say("%s requires %s", this.path, container.path);
+            }
+        }
+    }
+
+    override void systemHeaderIncluded(ref Origin origin, File includer, string included) {
+        // A file we depend on (includer) has included an external header (included)
+        // that isn't for one of the standard system libraries. Add the SysLib(s) to reqSysLibs.
+        if (includer in byContent && byContent[includer] is this) {
+            SysLib[] *libs = included in SysLib.byHeader;
+            errorUnless(libs !is null, origin, "Unknown system include %s", included);
+
+            foreach (lib; *libs) {
+                if (lib !in reqSysLibs) {
+                    reqSysLibs[lib] = true;
+                    if (g_print_deps) say("%s requires external lib '%s'", this, lib);
+                }
             }
         }
     }
@@ -1759,7 +1812,7 @@ final class StaticLib : Binary {
     string uniqueName;
 
     this(ref Origin origin, Pkg pkg, string name_,
-         string[] publicSources, string[] protectedSources, string[] sysLibs) {
+         string[] publicSources, string[] protectedSources) {
 
         // Decide on a name and path for the library.
         uniqueName = std.array.replace(buildPath(pkg.trail, name_), dirSeparator, "-") ~ "-s";
@@ -1768,9 +1821,12 @@ final class StaticLib : Binary {
 
         // Super-constructor takes care of compiling to object files and
         // finding out what libraries are needed.
-        super(origin, pkg, name_, _path, publicSources, protectedSources, sysLibs);
+        super(origin, pkg, name_, _path, publicSources, protectedSources);
 
-        // Decide on an action.
+        // Decide on an action. NOTE - the library depends on its objs AND
+        // its headers so that an include from any of its sources to another
+        // library is seen by includeAdded(), and sets up a reference to that
+        // library.
         string actionName = format("%-15s %s", "StaticLib", path);
         if (objs.length > 0) {
           // A proper static lib with object files
@@ -1778,11 +1834,11 @@ final class StaticLib : Binary {
           errorUnless(linkCommand && linkCommand.staticLib.length, origin,
                       "No link command for static lib from '%s'", sourceExt);
           action = new Action(origin, pkg, actionName,
-                              linkCommand.staticLib, [this], objs);
+                              linkCommand.staticLib, [this], objs ~ headers);
         }
         else {
           // A place-holder file to fit in with dependency tracking
-          action = new Action(origin, pkg, actionName, "DUMMY", [this], []);
+          action = new Action(origin, pkg, actionName, "DUMMY", [this], headers);
         }
     }
 }
@@ -1791,8 +1847,8 @@ final class StaticLib : Binary {
 // need to link with.
 //
 // target is the File that will use the libraries.
-// libs is all the static and system libraries known to be needed from
-// Bobfile statements and source-code include statement.
+// binaries is all the static and system libraries known to be needed from
+// source-code import/include statements.
 //
 // Returns the needed libraries sorted in descending number order,
 // which is the appropriate order for linking.
@@ -1978,8 +2034,7 @@ final class Exe : Binary {
     // that contain any included header files, and any required system libraries.
     // Note that any system libraries required by inferred local libraries are
     // automatically linked to.
-    this(ref Origin origin, Pkg pkg, string kind, string name_,
-         string[] sourceNames, string[] sysLibs) {
+    this(ref Origin origin, Pkg pkg, string kind, string name_, string[] sourceNames) {
         // interpret kind
         string dest, desc;
         switch (kind) {
@@ -1989,7 +2044,7 @@ final class Exe : Binary {
             default: assert(0, "invalid Exe kind " ~ kind);
         }
 
-        super(origin, pkg, name_ ~ "-exe", dest, sourceNames, [], sysLibs);
+        super(origin, pkg, name_ ~ "-exe", dest, sourceNames, []);
 
         LinkCommand *linkCommand = sourceExt in linkCommands;
         errorUnless(linkCommand && linkCommand.executable != null, origin,
@@ -2068,7 +2123,7 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
         File   sourceFile = File.addSource(origin, pkg, relName, Privacy.PUBLIC, false);
 
         // Decide on the destination directory.
-        string destDir = dest.length == 0 ? 
+        string destDir = dest.length == 0 ?
             buildPath("priv", pkg.trail, dir) :
             buildPath("dist", dest, dir);
 
@@ -2163,8 +2218,7 @@ void processBobfile(string indent, Pkg pkg) {
                                               pkg,
                                               statement.targets[0],
                                               statement.arg1,
-                                              statement.arg2,
-                                              statement.arg3);
+                                              statement.arg2);
             }
             break;
 
@@ -2190,8 +2244,7 @@ void processBobfile(string indent, Pkg pkg) {
                                   pkg,
                                   statement.rule,
                                   statement.targets[0],
-                                  statement.arg1,
-                                  statement.arg2);
+                                  statement.arg1);
             }
             break;
 
@@ -2421,7 +2474,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         success = false;
         string results = buildPath("tmp", myName);
 
-        bool isTest = false;
+        bool   isTest = false;
         string tmpPath;
 
         if (command == "DUMMY ") {
@@ -2438,7 +2491,8 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             if (exists(tmpPath)) {
                 rmdirRecurse(tmpPath);
             }
-            command = command[5..$] ~ " --tmp=" ~ tmpPath;
+            // TODO - pass tmpPath to the test somehow.
+            command = command[5..$];
         }
 
         string[] targs = split(targets, "|");
@@ -2451,6 +2505,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         }
 
         // launch child process to do the action, then wait for it to complete
+        command = strip(command);
         Pid pid = launcher.launch(command, results);
         success = wait(pid) == 0;
         launcher.completed(pid);
