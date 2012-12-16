@@ -17,8 +17,6 @@
  * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import process; // Local copy of new std.process, which is not yet available.
-
 import std.stdio;
 import std.ascii;
 import std.string;
@@ -33,12 +31,17 @@ import std.getopt;
 import std.concurrency;
 import std.functional;
 import std.exception;
+import std.process;
 
 import core.sys.posix.signal;
+import core.sys.posix.sys.wait;
+import core.stdc.errno;
+import core.sys.posix.unistd;
+import core.sys.posix.stdlib;
+import core.sys.posix.fcntl;
 
 // TODO:
-// * Work out a way to pass a temp directory to test exes.
-// * Rewrite signal handling code and sort out thread shutdown issues.
+// * Fix problem re spwned processes getting stuck in sleeping state.
 // * Conditional Bobfile statements.
 // * Add a mechanism to scrape the names of additional output filenames from
 //   a source file using (say) a regex.
@@ -245,48 +248,113 @@ class BailException : Exception {
     }
 }
 
-synchronized class Launcher {
+class Launcher {
     private {
-        bool      bailed;
-        bool[Pid] children;
+        bool        bailed;
+        int[string] children; // by worker name
     }
 
     // launch a process if we haven't bailed
-    Pid launch(string command, string resultsPath) {
-        if (bailed) {
-            say("Aborting launch because we have bailed");
-            throw new BailException();
+    int launch(string worker, string command, string resultsPath, string tmpPath) {
+        synchronized(this) {
+            if (bailed) {
+                throw new BailException();
+            }
         }
-        auto resultsFile = std.stdio.File(resultsPath, "w");
-        Pid child = spawnProcess(command, stdin, resultsFile, resultsFile);
-        children[child] = true;
-        return child;
+
+        command = "TMP_PATH=" ~ tmpPath ~ " " ~ command ~ " > " ~ resultsPath ~ " 2>&1";
+        int child = spawnvp(P_NOWAIT, "/bin/bash", ["bash", "-c", command]);
+
+        /+ This code occasionally blocks in the child for reasons unknown.
+        say("%s forking", worker);
+        auto child = fork();
+        if (child == -1) fatal("%s failed to spawn new process: %s", worker, command);
+
+        if (child == 0)
+        {
+            // Child process
+            execvp();
+
+            // Open resultsPath for use as stdout and stderr and /dev/zero for stdin
+            auto inFd  = core.sys.posix.fcntl.open(toStringz("/dev/zero"), O_RDONLY);
+            auto outFd = core.sys.posix.fcntl.open(toStringz(resultsPath), O_WRONLY | O_CREAT | O_TRUNC, octal!644);
+            auto errFd = dup(outFd);
+
+            assert(inFd  != -1, "Failed to open /dev/zero");
+            assert(outFd != -1, format("Failed to open %s", resultsPath));
+
+            // Redirect streams and close the old file descriptors.
+            dup2(inFd,  STDIN_FILENO);  close(inFd);
+            dup2(outFd, STDOUT_FILENO); close(outFd);
+            dup2(errFd, STDERR_FILENO); close(errFd);
+
+            // Set up nul-terminated arguments array
+            string[] args = split(command);
+            auto     argz = new const(char)*[](args.length+1);
+            foreach (i, arg; args) {
+                argz[i] = toStringz(arg);
+            }
+            argz[$-1] = null;
+
+            if (tmpPath.length) {
+                // Add TMP_PATH to environment
+                setenv(toStringz("TMP_PATH"), toStringz(tmpPath), 1);
+            }
+
+            // Execute program
+            execvp(argz[0], argz.ptr);
+
+            // If we get here, exec has failed.
+            assert(0, format("%s failed to exec: %s", worker, command));
+        }
+        else
+        {
+            // Parent process
+            synchronized(this) {
+                say("%s spawned child process %s", worker, child);
+                children[worker] = child;
+                return child;
+            }
+        }
+        +/
+
+        synchronized(this) {
+            children[worker] = child;
+            return child;
+        }
     }
 
     // a child has been finished with
-    void completed(Pid child) {
-        children.remove(child);
+    void completed(string worker) {
+        synchronized(this) {
+            //say("%s child process completed", worker);
+            children.remove(worker);
+        }
     }
 
     // bail, doing nothing if we had already bailed
     bool bail() {
-        if (!bailed) {
-            bailed = true;
-            foreach (child; children.byKey) {
-                kill(child.processID, SIGTERM);
+        synchronized(this) {
+            if (!bailed) {
+                bailed = true;
+                foreach (worker, child; children) {
+                    say("killing %s child process %s", worker, child);
+                    kill(child, SIGTERM);
+                }
+                return false;
             }
-            return false;
-        }
-        else {
-            return true;
+            else {
+                return true;
+            }
         }
     }
 }
 
-shared Launcher launcher;
-__gshared Tid   bailerTid;
+__gshared Launcher launcher;
+__gshared Tid      bailerTid;
 
 void doBailer() {
+    //say("bailer starting");
 
     void bail(int sig) {
         say("Got signal %s", sig);
@@ -299,6 +367,7 @@ void doBailer() {
                  (string dummy) { done = true; }
                );
     }
+    //say("bailer terminating");
 }
 
 extern (C) void mySignalHandler(int sig) nothrow {
@@ -309,11 +378,10 @@ extern (C) void mySignalHandler(int sig) nothrow {
 }
 
 shared static this() {
-    // set up shared Launcher and signal handling
+    // set up Launcher and signal handling
 
-    launcher  = new shared(Launcher)();
+    launcher  = new Launcher();
 
-    signal(SIGTERM, &mySignalHandler);
     signal(SIGINT,  &mySignalHandler);
     signal(SIGHUP,  &mySignalHandler);
 }
@@ -353,7 +421,7 @@ void error(A...)(ref Origin origin, string fmt, A a) {
     fatal(fmt, a);
 }
 
-void errorUnless(A ...)(bool condition, Origin origin, lazy string fmt, lazy A a) {
+void errorUnless(A...)(bool condition, Origin origin, lazy string fmt, lazy A a) {
     if (!condition) {
         error(origin, fmt, a);
     }
@@ -2461,18 +2529,49 @@ bool doPlanning(int numJobs,
 // Worker
 //-----------------------------------------------------
 
+
 void doWork(bool printActions, uint index, Tid plannerTid) {
     bool success;
 
     string myName = format("worker-%d", index);
     std.concurrency.register(myName, thisTid);
+    //say("%s starting", myName);
+
+    string resultsPath = buildPath("tmp", myName);
+
+    int localWait(int pid)
+    {
+        //say("%s - waiting on child %s", myName, pid);
+
+        int exitCode;
+        while (true)
+        {
+            int status;
+            auto check = waitpid(pid, &status, 0);
+            //say("%s - waitpid returned %s", myName, check);
+            if (check == -1 && errno == ECHILD) {
+                fatal("%s - Process %s does not exist or is not a child process.",
+                      myName, pid);
+            }
+
+            if (WIFEXITED(status))
+            {
+                return WEXITSTATUS(status);
+            }
+            else if (WIFSIGNALED(status))
+            {
+                return -WTERMSIG(status);
+            }
+            // Process has stopped, but not terminated, so we continue waiting.
+            //say("%s - still waiting on process %s", myName, pid);
+        }
+    }
 
     void perform(string action, string command, string targets) {
         say("%s", action);
         if (printActions) { say("\n%s\n", command); }
 
         success = false;
-        string results = buildPath("tmp", myName);
 
         bool   isTest = false;
         string tmpPath;
@@ -2485,13 +2584,12 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         }
 
         else if (command.length > 5 && command[0..5] == "TEST ") {
-            // Do test preparation - choose tmp dir and remove it, and set it on command
+            // Do test preparation - choose tmp dir and remove it
             isTest = true;
             tmpPath = buildPath("tmp", myName ~ "-test");
             if (exists(tmpPath)) {
                 rmdirRecurse(tmpPath);
             }
-            // TODO - pass tmpPath to the test somehow.
             command = command[5..$];
         }
 
@@ -2505,10 +2603,10 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         }
 
         // launch child process to do the action, then wait for it to complete
-        command = strip(command);
-        Pid pid = launcher.launch(command, results);
-        success = wait(pid) == 0;
-        launcher.completed(pid);
+        int pid = launcher.launch(myName, command, resultsPath, tmpPath);
+        success = localWait(pid) == 0;
+        //say("%s success=%s", myName, success);
+        launcher.completed(myName);
 
         if (!success) {
             bool bailed = launcher.bail;
@@ -2523,7 +2621,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
 
             if (!bailed) {
                 // Print error message
-                say("\n%s", readText(results));
+                say("\n%s", readText(resultsPath));
                 say("%s: FAILED\n%s", action, command);
                 say("Aborting build due to action failure");
             }
@@ -2533,9 +2631,6 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             // Success.
 
             if (isTest) {
-                // Append a success line to results file to make sure it is not empty
-                append(results, "\nPASSED\n");
-
                 // Remove tmpPath and copy results file onto build target
                 if (exists(tmpPath)) {
                     rmdirRecurse(tmpPath);
@@ -2543,7 +2638,9 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
                 if (targs.length != 1) {
                     fatal("Expected exactly one target for a test, but got '%s'", targets);
                 }
-                copy(results, targs[0]);
+                rename(resultsPath, targs[0]);
+                append(targs[0], "PASSED\n");
+
             }
 
             // tell planner the action succeeded
@@ -2564,8 +2661,8 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
     catch (Exception ex)  { say("Unexpected exception %s", ex); }
 
     // tell planner we are terminating
-    send(plannerTid, myName);
     //say("%s terminating", myName);
+    send(plannerTid, myName);
 }
 
 
@@ -2645,7 +2742,7 @@ int main(string[] args) {
                     if (tokens[1][0] == '"') {
                         tokens[1] = tokens[1][1..$-1];
                     }
-                    environment[tokens[0]] = tokens[1];
+                    setenv(toStringz(tokens[0]), toStringz(tokens[1]), 1);
                 }
             }
         }
