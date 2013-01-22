@@ -416,7 +416,7 @@ void fatal(A...)(string fmt, A a) {
     throw new BailException();
 }
 
-void error(A...)(ref Origin origin, string fmt, A a) {
+void error(A...)(Origin origin, string fmt, A a) {
     sayNoNewline("%s|%s| ERROR: ", origin.path, origin.line);
     fatal(fmt, a);
 }
@@ -986,7 +986,7 @@ final class Action {
     bool    finalised; // true if the action command has been finalised
     bool    issued;    // true if the action has been issued to a worker
 
-    this(ref Origin origin, Pkg pkg, string name_, string command_, File[] builds_, File[] depends_) {
+    this(Origin origin, Pkg pkg, string name_, string command_, File[] builds_, File[] depends_) {
         name     = name_;
         command  = command_;
         number   = nextNumber++;
@@ -1273,7 +1273,7 @@ class Node {
     }
 
     // create a node and place it into the tree
-    this(ref Origin origin, Node parent_, string name_, Privacy privacy_) {
+    this(Origin origin, Node parent_, string name_, Privacy privacy_) {
         assert(parent_);
         errorUnless(dirName(name_) == ".", origin, "Cannot define node with multi-part name '%s'", name_);
         parent  = parent_;
@@ -1381,7 +1381,7 @@ final class Pkg : Node {
 
     File bobfile;
 
-    this(ref Origin origin, Node parent_, string name_, Privacy privacy_) {
+    this(Origin origin, Node parent_, string name_, Privacy privacy_) {
         super(origin, parent_, name_, privacy_);
         bobfile = File.addSource(origin, this, "Bobfile", Privacy.PRIVATE, false);
     }
