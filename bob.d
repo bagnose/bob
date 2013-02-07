@@ -407,12 +407,12 @@ void say(A...)(string fmt, A a) {
     auto w = appender!(char[])();
     formattedWrite(w, fmt, a);
     stderr.writeln(w.data);
-    stderr.flush;
+    stderr.flush();
 }
 
 void fatal(A...)(string fmt, A a) {
     say(fmt, a);
-    launcher.bail;
+    launcher.bail();
     throw new BailException();
 }
 
@@ -1493,7 +1493,7 @@ class File : Node {
             action = null;
             outstanding.remove(this);
         }
-        touch;
+        touch();
     }
 
     // Scan this file for includes/imports, incorporating them into the
@@ -1562,7 +1562,7 @@ class File : Node {
 
             // totally important to touch includes AFTER we know what all of them are
             foreach (include; includes) {
-                include.touch;
+                include.touch();
             }
         }
     }
@@ -1623,7 +1623,7 @@ class File : Node {
             // give this file a chance to augment its action
             if (augmentAction()) {
                 // dependency added - touch this file again to re-check dependencies
-                touch;
+                touch();
                 return;
             }
             else {
@@ -1643,7 +1643,7 @@ class File : Node {
                             other = other.youngestDepend;
                         }
                     }
-                    action.issue;
+                    action.issue();
                     return;
                 }
                 else {
@@ -1661,7 +1661,7 @@ class File : Node {
         // This file is up to date
 
         // Scan for includes, possibly becoming clean in the process
-        if (!scanned) scan;
+        if (!scanned) scan();
         if (clean)    return;
 
         // Find out if includes are clean and what our effective mod_time is
@@ -1694,10 +1694,10 @@ class File : Node {
 
         // touch everything that includes or depends on this
         foreach (other; includedBy.byKey()) {
-            other.touch;
+            other.touch();
         }
         foreach (other; dependedBy.byKey()) {
-            other.touch;
+            other.touch();
         }
     }
 
@@ -2181,7 +2181,7 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
 
     if (isDir(fromPath)) {
         foreach (string path; dirEntries(fromPath, SpanMode.shallow)) {
-            miscFile(origin, pkg, buildPath(dir, name), path.baseName, dest);
+            miscFile(origin, pkg, buildPath(dir, name), path.baseName(), dest);
         }
     }
     else {
@@ -2245,7 +2245,7 @@ void processBobfile(string indent, Pkg pkg) {
     if (g_print_rules) say("%sprocessing %s", indent, pkg.bobfile);
     indent ~= "  ";
     foreach (statement; readBobfile(pkg.bobfile.path)) {
-        if (g_print_rules) say("%s%s", indent, statement.toString);
+        if (g_print_rules) say("%s%s", indent, statement.toString());
         switch (statement.rule) {
 
             case "contain":
@@ -2357,7 +2357,7 @@ void cleandirs() {
                     }
                     else {
                         // leaving a file in place
-                        dirs[entry.name.dirName] = true;
+                        dirs[entry.name.dirName()] = true;
                     }
                 }
                 else {
@@ -2367,7 +2367,7 @@ void cleandirs() {
                     }
                     else {
                         //say("  keeping non-empty dir %s", entry.name);
-                        dirs[entry.name.dirName] = true;
+                        dirs[entry.name.dirName()] = true;
                     }
                 }
             }
@@ -2414,7 +2414,7 @@ bool doPlanning(int numJobs,
         idlers[worker] = true;
         try {
             foreach (file; Action.byName[action].builds) {
-                file.updated;
+                file.updated();
             }
         }
         catch (BailException ex) { exiting = true; success = false; }
@@ -2429,7 +2429,7 @@ bool doPlanning(int numJobs,
 
 
     // set up some globals
-    readOptions;
+    readOptions();
     g_print_rules   = printStatements;
     g_print_deps    = printDeps;
     g_print_details = printDetails;
@@ -2452,7 +2452,7 @@ bool doPlanning(int numJobs,
         // enough to trigger building everything.
         foreach (path, file; File.byPath) {
             if (!file.built) {
-                file.touch;
+                file.touch();
             }
         }
     }
@@ -2609,7 +2609,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         launcher.completed(myName);
 
         if (!success) {
-            bool bailed = launcher.bail;
+            bool bailed = launcher.bail();
 
             // delete built files so the failure is tidy
             foreach (target; targs) {
