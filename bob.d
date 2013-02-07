@@ -505,7 +505,7 @@ bool isScannable(string suffix) {
 bool startsWith(string str, string[] prefixes) {
     foreach (prefix; prefixes) {
         size_t len = prefix.length;
-        if (str.length >= len && str[0..len] == prefix)
+        if (str.length >= len && str[0 .. len] == prefix)
         {
             return true;
         }
@@ -576,7 +576,7 @@ void readOptions() {
                     fatal("Commands require at least two extensions: %s", line);
                 }
                 string   input   = extensions[0];
-                string[] outputs = extensions[1..$];
+                string[] outputs = extensions[1 .. $];
 
                 errorUnless(input !in reservedExts, origin,
                             "Cannot use %s as source ext in commands", input);
@@ -610,9 +610,9 @@ void readOptions() {
                     generateCommands[input] = GenerateCommand(outputs, value);
                 }
             }
-            else if (key.length > 7 && key[0..7] == "syslib ") {
+            else if (key.length > 7 && key[0 .. 7] == "syslib ") {
                 // syslib declaration
-                SysLib.create(split(key[7..$]), split(value));
+                SysLib.create(split(key[7 .. $]), split(value));
             }
             else {
                 // A variable
@@ -684,7 +684,7 @@ Include[] scanForIncludes(string path) {
                     break;
                 case Phase.WORD:
                     if (isWhite(ch)) {
-                        if (content[anchor..i] == "include") {
+                        if (content[anchor .. i] == "include") {
                             phase = Phase.INCLUDE;
                         }
                         else {
@@ -707,9 +707,9 @@ Include[] scanForIncludes(string path) {
                     break;
                 case Phase.QUOTE:
                     if (ch == '"') {
-                        result ~= Include(content[anchor..i].idup, origin.line, true);
+                        result ~= Include(content[anchor .. i].idup, origin.line, true);
                         phase = Phase.NEXT;
-                        //say("%s: found quoted include of %s", path, content[anchor..i]);
+                        //say("%s: found quoted include of %s", path, content[anchor .. i]);
                     }
                     else if (isWhite(ch)) {
                         phase = Phase.NEXT;
@@ -717,9 +717,9 @@ Include[] scanForIncludes(string path) {
                     break;
                 case Phase.ANGLE:
                     if (ch == '>') {
-                        result ~= Include(content[anchor..i].idup, origin.line, false);
+                        result ~= Include(content[anchor .. i].idup, origin.line, false);
                         phase = Phase.NEXT;
-                        //say("%s: found system include of %s", path, content[anchor..i]);
+                        //say("%s: found system include of %s", path, content[anchor .. i]);
                     }
                     else if (isWhite(ch)) {
                         phase = Phase.NEXT;
@@ -782,7 +782,7 @@ Include[] scanForImports(string path) {
 
             if (inWord && (isWhite(ch) || ch == ':' || ch == ',' || ch == ';')) {
                 inWord = false;
-                word = content[anchor..pos];
+                word = content[anchor .. pos];
 
                 if (!inImport) {
                     if (isWhite(ch)) {
@@ -808,7 +808,7 @@ Include[] scanForImports(string path) {
                 foreach (external; externals) {
                     string ignoreStr = external ~ dirSeparator;
                     if (trail.length >= ignoreStr.length &&
-                        trail[0..ignoreStr.length] == ignoreStr)
+                        trail[0 .. ignoreStr.length] == ignoreStr)
                     {
                         ignored = true;
                         break;
@@ -891,15 +891,15 @@ Statement[] readBobfile(string path) {
         else if ((isWhite(ch) || ch == ':' || ch == ';')) {
             if (inWord) {
                 inWord = false;
-                string word = content[anchor..pos];
+                string word = content[anchor .. pos];
 
                 // should be a word in a statement
 
                 string[] words = [word];
 
-                if (word.length > 3 && word[0..2] == "${" && word[$-1] == '}') {
+                if (word.length > 3 && word[0 .. 2] == "${" && word[$-1] == '}') {
                     // macro substitution
-                    words = split(getOption(word[2..$-1]));
+                    words = split(getOption(word[2 .. $-1]));
                 }
 
                 if (word.length > 0) {
@@ -1082,7 +1082,7 @@ final class Action {
 
             // Local function to finish processing a token.
             void finishToken(size_t pos) {
-                suffix = text[anchor..pos];
+                suffix = text[anchor .. pos];
                 size_t start = result.length;
 
                 string[] values;
@@ -1141,7 +1141,7 @@ final class Action {
                 }
                 else if (inToken && ch == '{' && prev == '$') {
                     // Starting a varname within a token
-                    prefix  = text[anchor..pos-1];
+                    prefix  = text[anchor .. pos-1];
                     inCurly = true;
                     anchor  = pos + 1;
                 }
@@ -1150,7 +1150,7 @@ final class Action {
                     if (!inCurly) {
                         fatal("Unmatched '}' in '%s'", text);
                     }
-                    varname = text[anchor..pos];
+                    varname = text[anchor .. pos];
                     inCurly = false;
                     anchor  = pos + 1;
                 }
@@ -2583,14 +2583,14 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             return;
         }
 
-        else if (command.length > 5 && command[0..5] == "TEST ") {
+        else if (command.length > 5 && command[0 .. 5] == "TEST ") {
             // Do test preparation - choose tmp dir and remove it
             isTest = true;
             tmpPath = buildPath("tmp", myName ~ "-test");
             if (exists(tmpPath)) {
                 rmdirRecurse(tmpPath);
             }
-            command = command[5..$];
+            command = command[5 .. $];
         }
 
         string[] targs = split(targets, "|");
@@ -2707,7 +2707,7 @@ int main(string[] args) {
 
         if (args.length != 1) {
             say("Option processing failed. There are %s unprocessed argument(s): ", args.length - 1);
-            foreach (uint i, arg; args[1..args.length]) {
+            foreach (uint i, arg; args[1 .. args.length]) {
                 say("  %s. \"%s\"", i + 1, arg);
             }
             returnValue = 2;
@@ -2740,7 +2740,7 @@ int main(string[] args) {
                 string[] tokens = split(line, "=");
                 if (tokens.length == 2 && tokens[0][0] != '#') {
                     if (tokens[1][0] == '"') {
-                        tokens[1] = tokens[1][1..$-1];
+                        tokens[1] = tokens[1][1 .. $-1];
                     }
                     setenv(toStringz(tokens[0]), toStringz(tokens[1]), 1);
                 }
@@ -2748,7 +2748,7 @@ int main(string[] args) {
         }
 
         // spawn the workers
-        foreach (uint i; 0..numJobs) {
+        foreach (uint i; 0 .. numJobs) {
             //say("spawning worker %s", i);
             spawn(&doWork, printActions, i, thisTid);
         }
