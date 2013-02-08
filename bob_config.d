@@ -1,7 +1,7 @@
 /*
  * Copyright 2012, Graham St Jack.
  *
- * This file is part of bob, a software build tool. 
+ * This file is part of bob, a software build tool.
  *
  * Bob is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -212,7 +212,7 @@ void establishBuildDir(string buildDir, string srcDir, const Vars vars) {
     // Create run script
     update(buildPath(buildDir, "run"),
            "#!/bin/bash\nsource " ~ env ~ "\nexec \"$@\"\n",
-           true); 
+           true);
 
 
     //
@@ -329,6 +329,7 @@ Vars parseConfig(string configFile, string mode) {
     bool    foundMode;
     string  commandType;
     Vars    vars;
+    size_t  syslibNum;
 
     if (!exists(configFile)) {
         writefln("Could not file config file %s", configFile);
@@ -384,7 +385,9 @@ Vars parseConfig(string configFile, string mode) {
                 string[] tokens = split(line, " =");
                 if (tokens.length == 2) {
                     // Define a new variable.
-                    vars.append("syslib " ~ strip(tokens[0]), split(tokens[1]), AppendType.notExist);
+                    vars.append(format("syslib%02d %s", ++syslibNum, strip(tokens[0])),
+                                split(tokens[1]),
+                                AppendType.notExist);
                 }
             }
         }

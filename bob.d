@@ -568,6 +568,7 @@ void readOptions() {
         if (tokens.length == 2) {
             string key   = strip(tokens[0]);
             string value = strip(tokens[1]);
+
             if (key[0] == '.') {
                 // A command of some sort
 
@@ -610,9 +611,9 @@ void readOptions() {
                     generateCommands[input] = GenerateCommand(outputs, value);
                 }
             }
-            else if (key.length > 7 && key[0..7] == "syslib ") {
+            else if (key.length > 6 && key[0..6] == "syslib") {
                 // syslib declaration
-                SysLib.create(split(key[7..$]), split(value));
+                SysLib.create(split(key[9..$]), split(value));
             }
             else {
                 // A variable
