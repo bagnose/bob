@@ -372,7 +372,7 @@ void doBailer() {
 
 extern (C) void mySignalHandler(int sig) nothrow {
     try {
-        send(bailerTid, sig);
+        bailerTid.send(sig);
     }
     catch (Exception ex) { assert(0, format("Unexpected exception: %s", ex)); }
 }
@@ -2471,7 +2471,7 @@ bool doPlanning(int numJobs,
 
             if (exiting) {
                 // tell idle worker to terminate
-                send(tid, true);
+                tid.send(true);
                 toilers ~= idler;
             }
             else if (!Action.queue.empty) {
@@ -2489,7 +2489,7 @@ bool doPlanning(int numJobs,
                     targets ~= target.path;
                 }
                 //say("issuing action %s", next.name);
-                send(tid, next.name.idup, next.command.idup, targets.idup);
+                tid.send(next.name.idup, next.command.idup, targets.idup);
                 toilers ~= idler;
                 ++inflight;
             }
@@ -2579,7 +2579,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         if (command == "DUMMY ") {
             // Just write some text into the target file
             std.file.write(targets, "dummy");
-            send(plannerTid, myName, action);
+            plannerTid.send(myName, action);
             return;
         }
 
@@ -2644,13 +2644,13 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             }
 
             // tell planner the action succeeded
-            send(plannerTid, myName, action);
+            plannerTid.send(myName, action);
         }
     }
 
 
     try {
-        send(plannerTid, myName);
+        plannerTid.send(myName);
         bool done;
         while (!done) {
             receive( (string action, string command, string targets) { perform(action, command, targets); },
@@ -2662,7 +2662,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
 
     // tell planner we are terminating
     //say("%s terminating", myName);
-    send(plannerTid, myName);
+    plannerTid.send(myName);
 }
 
 
