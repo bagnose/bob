@@ -437,7 +437,7 @@ int main(string[] args) {
     }
 
     string buildDir = args[1];
-    string srcDir   = getcwd;
+    string srcDir   = getcwd();
 
 
     //
