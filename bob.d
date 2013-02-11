@@ -837,6 +837,25 @@ Include[] scanForImports(string path) {
 
 
 //
+// Return the SysLibs implied by include/import of the specified header/module,
+// or an empty array if none are implied.
+//
+// The libs are keyed on either a full trail to a header/module, or an ancestor
+// of the trail. eg: one/two/three.h, one/two, or one.
+//
+SysLib[] knownSystemHeader(string header, SysLib[][string] libs) {
+    string trail = header;
+    while (trail != ".") {
+        if (trail in libs) {
+            return libs[trail];
+        }
+        trail = dirName(trail);
+    }
+    return [];
+}
+
+
+//
 // read a Bobfile, returning all its statements
 //
 // //  a simple statement
@@ -1530,16 +1549,19 @@ class File : Node {
                     include = buildPath("obj", entry.trail) in byPath;
                 }
                 if (include is null) {
-                    // Last chance - it might be a known system header.
-                    if (entry.trail in SysLib.byHeader) {
-                        // known system header - tell containers about it so they can pick up SysLibs
+                    // Last chance - it might be a known system header or header directory.
+
+                    SysLib[] libs = knownSystemHeader(entry.trail, SysLib.byHeader);
+                    if (libs.length > 0) {
+                        // known system header or system header directory -
+                        // tell containers about it so they can pick up SysLibs
                         //say("included external header %s", entry.trail);
-                        systemHeaderIncluded(origin, this, entry.trail);
+                        systemHeaderIncluded(origin, this, libs);
                         continue;
                     }
                     else if (!entry.quoted) {
-                        // Ignore unknown system includes, hoping they are from std libs
-                        //say("ignoring unknown system header %s, hoping it is a for a standard lib", entry.trail);
+                        // Ignore unknown C/C++ <system> includes, hoping they are from std libs
+                        //say("ignoring unknown system header %s, hoping it is for a standard lib", entry.trail);
                         continue;
                     }
                 }
@@ -1577,10 +1599,10 @@ class File : Node {
     }
 
     // A system header has been included by includer (which is this or a file this depends on).
-    // Specialisations of File override to inder linking to SysLibs.
-    void systemHeaderIncluded(ref Origin origin, File includer, string included) {
+    // Specialisations of File override to infer linking to SysLibs.
+    void systemHeaderIncluded(ref Origin origin, File includer, SysLib[] libs) {
         foreach (depend; dependedBy.keys()) {
-            depend.systemHeaderIncluded(origin, includer, included);
+            depend.systemHeaderIncluded(origin, includer, libs);
         }
     }
 
@@ -1855,14 +1877,11 @@ abstract class Binary : File {
         }
     }
 
-    override void systemHeaderIncluded(ref Origin origin, File includer, string included) {
+    override void systemHeaderIncluded(ref Origin origin, File includer, SysLib[] libs) {
         // A file we depend on (includer) has included an external header (included)
         // that isn't for one of the standard system libraries. Add the SysLib(s) to reqSysLibs.
         if (includer in byContent && byContent[includer] is this) {
-            SysLib[] *libs = included in SysLib.byHeader;
-            errorUnless(libs !is null, origin, "Unknown system include %s", included);
-
-            foreach (lib; *libs) {
+            foreach (lib; libs) {
                 if (lib !in reqSysLibs) {
                     reqSysLibs[lib] = true;
                     if (g_print_deps) say("%s requires external lib '%s'", this, lib);
