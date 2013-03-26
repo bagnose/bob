@@ -1526,7 +1526,8 @@ class File : Node {
             // scan for includes
             Include[] entries;
             string ext = extension(path);
-            if (ext == ".c" || ext == ".cc" || ext == ".cpp" || ext == ".h") {
+            if (ext == ".c" || ext == ".cc" || ext == ".cpp" ||
+                ext == ".h" || ext == ".hh" || ext == ".hpp") {
                 entries = scanForIncludes(path);
             }
             else if (ext == ".d") {
