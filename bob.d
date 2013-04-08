@@ -491,10 +491,11 @@ bool isScannable(string suffix) {
         ext == ".c"   ||
         ext == ".h"   ||
         ext == ".cc"  ||
+        ext == ".hh"  ||
         ext == ".cxx" ||
+        ext == ".hxx" ||
         ext == ".cpp" ||
         ext == ".hpp" ||
-        ext == ".hh"  ||
         ext == ".d";
 }
 
@@ -1526,14 +1527,22 @@ class File : Node {
             // scan for includes
             Include[] entries;
             string ext = extension(path);
-            if (ext == ".c" || ext == ".cc" || ext == ".cpp" ||
-                ext == ".h" || ext == ".hh" || ext == ".hpp") {
+
+            switch (ext) {
+              case ".c":
+              case ".h":
+              case ".cc":
+              case ".hh":
+              case ".cxx":
+              case ".hxx":
+              case ".cpp":
+              case ".hpp":
                 entries = scanForIncludes(path);
-            }
-            else if (ext == ".d") {
+                break;
+              case ".d":
                 entries = scanForImports(path);
-            }
-            else {
+                break;
+              default:
                 fatal("Don't know how to scan %s for includes/imports", path);
             }
 
