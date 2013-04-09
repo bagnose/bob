@@ -1,5 +1,5 @@
 /**
- * Copyright 2012, Graham St Jack.
+ * Copyright 2012-2013, Graham St Jack.
  *
  * This file is part of bob, a software build tool.
  *
@@ -17,6 +17,8 @@
  * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+import process;
+
 import std.stdio;
 import std.ascii;
 import std.string;
@@ -31,26 +33,22 @@ import std.getopt;
 import std.concurrency;
 import std.functional;
 import std.exception;
-import std.process;
 
 import core.sys.posix.signal;
-import core.sys.posix.sys.wait;
-import core.stdc.errno;
-import core.sys.posix.unistd;
-import core.sys.posix.stdlib;
-import core.sys.posix.fcntl;
 
 // TODO:
-// * Fix problem re spwned processes getting stuck in sleeping state.
+// * export-lib rule that auto-copies public headers. A dynamic lib incorporating
+//   a public static lib has to only contain exported static libs. An exported-lib
+//   that is not incorporated into a dynamic lib is also copied into dist/lib.
+// * Port to windows.
+//
+// Lower priority wish-list:
 // * Conditional Bobfile statements.
 // * Add a mechanism to scrape the names of additional output filenames from
 //   a source file using (say) a regex.
 // * Generation of documentation from the code.
-// * public-lib rule that auto-copies public headers. A dynamic lib incorporating
-//   a public static lib has to only contain public static libs. A public-lib
-//   that is not incorporated into a dynamic lib is also copied into dist/lib.
-// * Improve correctness of scanning for imports and includes.
 // * Support code coverage analysis for test-exe.
+// * Improve correctness of scanning for imports and includes.
 
 /*
 
@@ -127,13 +125,13 @@ The file state sequence is:
     dependencies_clean         skipped if no dependencies
     building                   skipped if no build action
     up-to-date
-    scanning_for_includes
+    scanning_for_includes      skipped if not scannable
     includes_known
     clean
 
 As files become buildable, actions are passed to workers.
 
-Results cause the dependency graph to be updated, allowing more actions to
+Build results cause the dependency graph to be updated, allowing more actions to
 be issued. Specifically, generated source files are scanned for import/include
 after they are up to date, and the dependency graph and action commands are
 adjusted accordingly.
@@ -233,102 +231,34 @@ public:
 
 
 //------------------------------------------------------------------------------
-// Synchronized object that launches external processes in the background
-// and keeps track of their PIDs. A one-shot bail() method kills all those
-// launched processes and prevents any more from being launched.
+// Synchronized object that keeps track of which spawned processes
+// are in play, and raises SIGTERM on them when told to bail.
 //
 // bail() is called by the error() functions, which then throw an exception.
-//
-// We also install a signal handler to bail on receipt of various signals.
 //------------------------------------------------------------------------------
 
-class BailException : Exception {
-    this() {
-        super("Bail");
-    }
-}
-
-class Launcher {
+class Killer {
     private {
-        bool        bailed;
-        int[string] children; // by worker name
+        bool      bailed;
+        bool[Pid] children;
     }
 
-    // launch a process if we haven't bailed
-    int launch(string worker, string command, string resultsPath, string tmpPath) {
+    // remember that a process has been launched, killing it if we have bailed
+    void launched(string worker, Pid child) {
         synchronized(this) {
             if (bailed) {
-                throw new BailException();
+                kill(child.processID, SIGTERM);
             }
-        }
-
-        command = "TMP_PATH=" ~ tmpPath ~ " " ~ command ~ " > " ~ resultsPath ~ " 2>&1";
-        int child = spawnvp(P_NOWAIT, "/bin/bash", ["bash", "-c", command]);
-
-        /+ This code occasionally blocks in the child for reasons unknown.
-        say("%s forking", worker);
-        auto child = fork();
-        if (child == -1) fatal("%s failed to spawn new process: %s", worker, command);
-
-        if (child == 0)
-        {
-            // Child process
-            execvp();
-
-            // Open resultsPath for use as stdout and stderr and /dev/zero for stdin
-            auto inFd  = core.sys.posix.fcntl.open(toStringz("/dev/zero"), O_RDONLY);
-            auto outFd = core.sys.posix.fcntl.open(toStringz(resultsPath), O_WRONLY | O_CREAT | O_TRUNC, octal!644);
-            auto errFd = dup(outFd);
-
-            assert(inFd  != -1, "Failed to open /dev/zero");
-            assert(outFd != -1, format("Failed to open %s", resultsPath));
-
-            // Redirect streams and close the old file descriptors.
-            dup2(inFd,  STDIN_FILENO);  close(inFd);
-            dup2(outFd, STDOUT_FILENO); close(outFd);
-            dup2(errFd, STDERR_FILENO); close(errFd);
-
-            // Set up nul-terminated arguments array
-            string[] args = split(command);
-            auto     argz = new const(char)*[](args.length+1);
-            foreach (i, arg; args) {
-                argz[i] = toStringz(arg);
+            else {
+                children[child] = true;
             }
-            argz[$-1] = null;
-
-            if (tmpPath.length) {
-                // Add TMP_PATH to environment
-                setenv(toStringz("TMP_PATH"), toStringz(tmpPath), 1);
-            }
-
-            // Execute program
-            execvp(argz[0], argz.ptr);
-
-            // If we get here, exec has failed.
-            assert(0, format("%s failed to exec: %s", worker, command));
-        }
-        else
-        {
-            // Parent process
-            synchronized(this) {
-                say("%s spawned child process %s", worker, child);
-                children[worker] = child;
-                return child;
-            }
-        }
-        +/
-
-        synchronized(this) {
-            children[worker] = child;
-            return child;
         }
     }
 
     // a child has been finished with
-    void completed(string worker) {
+    void completed(string worker, Pid child) {
         synchronized(this) {
-            //say("%s child process completed", worker);
-            children.remove(worker);
+            children.remove(child);
         }
     }
 
@@ -337,9 +267,8 @@ class Launcher {
         synchronized(this) {
             if (!bailed) {
                 bailed = true;
-                foreach (worker, child; children) {
-                    say("killing %s child process %s", worker, child);
-                    kill(child, SIGTERM);
+                foreach (child; children.keys()) {
+                    kill(child.processID, SIGTERM);
                 }
                 return false;
             }
@@ -350,15 +279,23 @@ class Launcher {
     }
 }
 
-__gshared Launcher launcher;
-__gshared Tid      bailerTid;
+__gshared Killer killer;
+
+shared static this() {
+    killer = new Killer();
+}
+
+
+//-----------------------------------------------------------------------
+// Signal handling to bail on SIGINT or SIGHUP.
+//-----------------------------------------------------------------------
+
+__gshared Tid bailerTid;
 
 void doBailer() {
-    //say("bailer starting");
-
     void bail(int sig) {
         say("Got signal %s", sig);
-        launcher.bail();
+        killer.bail();
     }
 
     bool done;
@@ -367,7 +304,6 @@ void doBailer() {
                  (string dummy) { done = true; }
                );
     }
-    //say("bailer terminating");
 }
 
 extern (C) void mySignalHandler(int sig) nothrow {
@@ -378,14 +314,22 @@ extern (C) void mySignalHandler(int sig) nothrow {
 }
 
 shared static this() {
-    // set up Launcher and signal handling
+    bailerTid = spawn(&doBailer);
 
-    launcher  = new Launcher();
-
-    signal(SIGINT,  &mySignalHandler);
-    signal(SIGHUP,  &mySignalHandler);
+    signal(SIGINT, &mySignalHandler);
+    signal(SIGHUP, &mySignalHandler);
 }
 
+
+//------------------------------------------------------------------------------
+// Exception thrown when the build has failed.
+//------------------------------------------------------------------------------
+
+class BailException : Exception {
+    this() {
+        super("Bail");
+    }
+}
 
 //------------------------------------------------------------------------------
 // printing utility functions
@@ -407,12 +351,11 @@ void say(A...)(string fmt, A a) {
     auto w = appender!(char[])();
     formattedWrite(w, fmt, a);
     stderr.writeln(w.data);
-    stderr.flush();
 }
 
 void fatal(A...)(string fmt, A a) {
     say(fmt, a);
-    launcher.bail();
+    killer.bail();
     throw new BailException();
 }
 
@@ -2434,8 +2377,6 @@ bool doPlanning(int numJobs,
     bool         exiting;
     bool         success = true;
 
-    // Spawn the bailer.
-    bailerTid = spawn(&doBailer);
 
     // receive registration message from each worker and remember its name
     while (workers.length < numJobs) {
@@ -2575,39 +2516,12 @@ bool doPlanning(int numJobs,
 void doWork(bool printActions, uint index, Tid plannerTid) {
     bool success;
 
-    string myName = format("worker-%d", index);
+    string myName = format("worker%d", index);
     std.concurrency.register(myName, thisTid);
     //say("%s starting", myName);
 
     string resultsPath = buildPath("tmp", myName);
-
-    int localWait(int pid)
-    {
-        //say("%s - waiting on child %s", myName, pid);
-
-        int exitCode;
-        while (true)
-        {
-            int status;
-            auto check = waitpid(pid, &status, 0);
-            //say("%s - waitpid returned %s", myName, check);
-            if (check == -1 && errno == ECHILD) {
-                fatal("%s - Process %s does not exist or is not a child process.",
-                      myName, pid);
-            }
-
-            if (WIFEXITED(status))
-            {
-                return WEXITSTATUS(status);
-            }
-            else if (WIFSIGNALED(status))
-            {
-                return -WTERMSIG(status);
-            }
-            // Process has stopped, but not terminated, so we continue waiting.
-            //say("%s - still waiting on process %s", myName, pid);
-        }
-    }
+    string tmpPath;
 
     void perform(string action, string command, string targets) {
         say("%s", action);
@@ -2615,8 +2529,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
 
         success = false;
 
-        bool   isTest = false;
-        string tmpPath;
+        bool isTest = command.length > 5 && command[0 .. 5] == "TEST ";
 
         if (command == "DUMMY ") {
             // Just write some text into the target file
@@ -2625,14 +2538,13 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
             return;
         }
 
-        else if (command.length > 5 && command[0 .. 5] == "TEST ") {
-            // Do test preparation - choose tmp dir and remove it
-            isTest = true;
+        else if (isTest) {
+            // Do test preparation - choose tmp dir and remove it if present
             tmpPath = buildPath("tmp", myName ~ "-test");
             if (exists(tmpPath)) {
                 rmdirRecurse(tmpPath);
             }
-            command = command[5 .. $];
+            command = command[5 .. $] ~ " --tmp=" ~ tmpPath;
         }
 
         string[] targs = split(targets, "|");
@@ -2645,14 +2557,16 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         }
 
         // launch child process to do the action, then wait for it to complete
-        int pid = launcher.launch(myName, command, resultsPath, tmpPath);
-        success = localWait(pid) == 0;
-        //say("%s success=%s", myName, success);
-        launcher.completed(myName);
+
+        auto input  = std.stdio.File("/dev/null", "r");
+        auto output = std.stdio.File(resultsPath, "w");
+        Pid  child  = spawnProcess(command, input, output, output);
+
+        killer.launched(myName, child);
+        success = wait(child) == 0;
+        killer.completed(myName, child);
 
         if (!success) {
-            bool bailed = launcher.bail();
-
             // delete built files so the failure is tidy
             foreach (target; targs) {
                 if (exists(target)) {
@@ -2660,6 +2574,8 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
                     std.file.remove(target);
                 }
             }
+
+            bool bailed = killer.bail();
 
             if (!bailed) {
                 // Print error message
@@ -2682,7 +2598,10 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
                 }
                 rename(resultsPath, targs[0]);
                 append(targs[0], "PASSED\n");
-
+            }
+            else
+            {
+                remove(resultsPath);
             }
 
             // tell planner the action succeeded
@@ -2695,8 +2614,6 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
         plannerTid.send(myName);
         bool done;
         while (!done) {
-            //receive( (string action, string command, string targets) { perform(action, command, targets); },
-            // Workaround for previous line:
             receive( (string action, string command_targets)
                     {
                       string command;
@@ -2704,7 +2621,7 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
                       separateStr(command_targets, command, targets);
                       perform(action, command, targets);
                     },
-                     (bool dummy)                                    { done = true; });
+                    (bool dummy) { done = true; });
         }
     }
     catch (BailException) {}
@@ -2792,7 +2709,7 @@ int main(string[] args) {
                     if (tokens[1][0] == '"') {
                         tokens[1] = tokens[1][1 .. $-1];
                     }
-                    setenv(toStringz(tokens[0]), toStringz(tokens[1]), 1);
+                    Environment[tokens[0]] = tokens[1];
                 }
             }
         }

@@ -86,7 +86,6 @@ import std.stdio;
 import std.string;
 import std.typecons;
 
-
 version(Posix)
 {
     version(OSX)
@@ -407,6 +406,8 @@ version(Posix) private Pid spawnProcessImpl
     auto stderrFD = core.stdc.stdio.fileno(stderr_.getFP());
     errnoEnforce(stderrFD != -1, "Invalid stderr stream");
 
+    auto argz  = toArgz(fullName, args);
+    auto namez = toStringz(fullName);
 
     auto id = fork();
     errnoEnforce (id >= 0, "Cannot spawn new process");
@@ -431,7 +432,7 @@ version(Posix) private Pid spawnProcessImpl
         if (stderrFD > STDERR_FILENO)  close(stderrFD);
 
         // Execute program
-        execve(toStringz(fullName), toArgz(fullName, args), envz);
+        execve(namez, argz, envz);
 
         // If execution fails, exit as quick as possible.
         perror("spawnProcess(): Failed to execute program");
