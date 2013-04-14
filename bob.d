@@ -943,7 +943,7 @@ final class Action {
     string  name;      // the name of the action
     string  command;   // the action command-string
     int     number;    // influences build order
-    File[]  inputs;    // files the action directly relies on
+    File[]  inputs;    // files the action directly relies on, specified with initial depends
     File[]  builds;    // files that this action builds
     File[]  depends;   // files that the action's targets depend on
     bool    finalised; // true if the action command has been finalised
@@ -1504,7 +1504,6 @@ class File : Node {
                     }
                     else if (!entry.quoted) {
                         // Ignore unknown C/C++ <system> includes, hoping they are from std libs
-                        //say("ignoring unknown system header %s, hoping it is for a standard lib", entry.trail);
                         continue;
                     }
                 }
@@ -1522,11 +1521,12 @@ class File : Node {
                 if (g_print_deps) say("%s includes/imports %s", this.path, include.path);
                 includeAdded(origin, this, *include);
 
-                // now (after includeAdded) add a reference between this file and the included one
+                // now (after includeAdded so this File's parents have had a chance to add
+                // an enabling reference), add a reference between this file and the included one
                 addReference(origin, *include);
             }
 
-            // totally important to touch includes AFTER we know what all of them are
+            // touch includes now that we know what all of them are
             foreach (include; includes) {
                 include.touch();
             }
@@ -1551,7 +1551,7 @@ class File : Node {
 
 
     // This file's action is about to be issued, and this is the last chance to
-    // add dependencies to it. Specialisation should override this method, and at the
+    // add dependencies to it. Specialisations should override this method, and at the
     // very least finalise the action's command.
     // Return true if dependencies were added.
     bool augmentAction() {
@@ -1800,22 +1800,25 @@ abstract class Binary : File {
         // and also add a dependency on that other Binary. Note that the dependency
         // is often not 'real' (a StaticLib doesn't actually depend on other StaticLibs),
         // but it is a very useful simplification when working out which libraries an
-        // Exe depends on.
+        // Exe depends on, and which StaticLibs a DynamicLib has to contain.
         if (g_print_deps) say("%s: %s includes %s", this.path, includer.path, included.path);
-        if (includer in byContent && byContent[includer] is this) {
-            Binary *container = included in byContent;
-            errorUnless(container !is null, origin, "included file is not contained in a library");
-            if (*container !is this && *container !in reqBinaries) {
+        Binary *includerContainer = includer in byContent;
+        if (includerContainer && *includerContainer is this) {
+            Binary *includedContainer = included in byContent;
+            errorUnless(includedContainer !is null,
+                        origin,
+                        "included file is not contained in a library");
+            if (*includedContainer !is this && *includedContainer !in reqBinaries) {
 
                 // we require the container of the included file
-                if (g_print_deps) say("%s requires %s", this.path, container.path);
-                reqBinaries[*container] = true;
+                if (g_print_deps) say("%s requires %s", this.path, includedContainer.path);
+                reqBinaries[*includedContainer] = true;
 
                 // add a dependancy and a reference
-                addReference(origin, *container,
+                addReference(origin, *includedContainer,
                              format(" because %s includes %s", includer.path, included.path));
-                action.addDependency(*container);
-                if (g_print_deps) say("%s requires %s", this.path, container.path);
+                action.addDependency(*includedContainer);
+                if (g_print_deps) say("%s requires %s", this.path, includedContainer.path);
             }
         }
     }
@@ -1823,7 +1826,8 @@ abstract class Binary : File {
     override void systemHeaderIncluded(ref Origin origin, File includer, SysLib[] libs) {
         // A file we depend on (includer) has included an external header (included)
         // that isn't for one of the standard system libraries. Add the SysLib(s) to reqSysLibs.
-        if (includer in byContent && byContent[includer] is this) {
+        Binary *container = includer in byContent;
+        if (container && *container is this) {
             foreach (lib; libs) {
                 if (lib !in reqSysLibs) {
                     reqSysLibs[lib] = true;
@@ -1857,15 +1861,18 @@ final class StaticLib : Binary {
         // Decide on an action. NOTE - the library depends on its objs AND
         // its headers so that an include from any of its sources to another
         // library is seen by includeAdded(), and sets up a reference to that
-        // library.
+        // library. We add the headers after creating the action in order to keep
+        // the headers separate from inputs.
         string actionName = format("%-15s %s", "StaticLib", path);
         if (objs.length > 0) {
           // A proper static lib with object files
           LinkCommand *linkCommand = sourceExt in linkCommands;
           errorUnless(linkCommand && linkCommand.staticLib.length, origin,
                       "No link command for static lib from '%s'", sourceExt);
-          action = new Action(origin, pkg, actionName,
-                              linkCommand.staticLib, [this], objs ~ headers);
+          action = new Action(origin, pkg, actionName, linkCommand.staticLib, [this], objs);
+          foreach (header; headers) {
+              action.addDependency(header);
+          }
         }
         else {
           // A place-holder file to fit in with dependency tracking
@@ -1972,7 +1979,7 @@ final class DynamicLib : File {
     this(ref Origin origin_, Pkg pkg, string name_, string[] staticTrails) {
         origin = origin_;
 
-        uniqueName = std.array.replace(buildPath(pkg.trail, name_), "/", "-");
+        uniqueName = std.array.replace(buildPath(pkg.trail, name_), dirSeparator, "-");
         if (name_ == pkg.name) uniqueName = std.array.replace(pkg.trail, dirSeparator, "-");
         string _path = buildPath("dist", "lib", format("lib%s.so", uniqueName));
 
@@ -2029,7 +2036,8 @@ final class DynamicLib : File {
         DynamicLib[] neededDynamicLibs;
         SysLib[]     neededSysLibs;
 
-        neededLibs(this, cast(Binary[]) staticLibs, neededStaticLibs, neededDynamicLibs, neededSysLibs);
+        neededLibs(this, cast(Binary[]) staticLibs,
+                   neededStaticLibs, neededDynamicLibs, neededSysLibs);
 
         string[] libs;
         bool added;
@@ -2081,7 +2089,8 @@ final class Exe : Binary {
         errorUnless(linkCommand && linkCommand.executable != null, origin,
                     "No command to link and executable from sources of extension %s", sourceExt);
 
-        action = new Action(origin, pkg, format("%-15s %s", desc, dest), linkCommand.executable, [this], objs);
+        action = new Action(origin, pkg, format("%-15s %s", desc, dest),
+                            linkCommand.executable, [this], objs);
 
         if (kind == "test-exe") {
             File result = new File(origin, pkg, name ~ "-result",
