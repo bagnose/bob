@@ -1867,15 +1867,18 @@ final class StaticLib : Binary {
         // Decide on an action. NOTE - the library depends on its objs AND
         // its headers so that an include from any of its sources to another
         // library is seen by includeAdded(), and sets up a reference to that
-        // library.
+        // library. We add the headers after creating the action in order to keep
+        // the headers separate from inputs.
         string actionName = format("%-15s %s", "StaticLib", path);
         if (objs.length > 0) {
           // A proper static lib with object files
           LinkCommand *linkCommand = sourceExt in linkCommands;
           errorUnless(linkCommand && linkCommand.staticLib.length, origin,
                       "No link command for static lib from '%s'", sourceExt);
-          action = new Action(origin, pkg, actionName,
-                              linkCommand.staticLib, [this], objs ~ headers);
+          action = new Action(origin, pkg, actionName, linkCommand.staticLib, [this], objs);
+          foreach (header; headers) {
+              action.addDependency(header);
+          }
         }
         else {
           // A place-holder file to fit in with dependency tracking
@@ -1982,7 +1985,7 @@ final class DynamicLib : File {
     this(ref Origin origin_, Pkg pkg, string name_, string[] staticTrails) {
         origin = origin_;
 
-        uniqueName = std.array.replace(buildPath(pkg.trail, name_), "/", "-");
+        uniqueName = std.array.replace(buildPath(pkg.trail, name_), dirSeparator, "-");
         if (name_ == pkg.name) uniqueName = std.array.replace(pkg.trail, dirSeparator, "-");
         string _path = buildPath("dist", "lib", format("lib%s.so", uniqueName));
 
