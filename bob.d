@@ -14,7 +14,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Foobar.  If not, see <http://www.gnu.org/licenses/>.
+ * along with Bob.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 import process;
@@ -69,22 +69,38 @@ Objectives of this build tool are:
 Refer to README and INSTRUCTIONS and examples for details on how to use bob.
 
 
-Dependency rules
-----------------
+Relationships Between Files
+---------------------------
 
-Files and their owning packages are arranged in a tree with cross-linking
-dependencies. Each node in the tree can be public or protected. The root of the
-tree contains its children publicly.
+Files are arranged in a tree that represents containment, with additional
+references between them implied by includes/imports in the code and explicit
+refer statements in the Bobfiles. These references are used to manage dependencies.
 
-The dependency rules are:
-* A protected node can only be referred to by sibling nodes or nodes contained
+An Action that builds Files depends on other Files. The Action cannot be issued
+until all the its dependencies are satisfied, and will be issued if any of its
+built Files are out of date wrt any of its dependencies. Each dependency has a
+matching reference.
+
+A scannable File may include/import (include) other Files. If File A directly or
+transitively includes File B, then all files that depend on File A also depend
+on File B.
+
+
+Reference Rules
+---------------
+
+Each Node in the tree can be public or protected. The Node of the tree contains
+its children publicly.
+
+The reference rules are:
+* A protected Node can only be referred to by sibling Nodes or Nodes contained
   by those siblings.
-* A node can only refer to another node if its parent transitively refers to or
-  transitively contains that other node.
-* Circular dependencies are not allowed.
+* A Node can only refer to another Node if its parent transitively refers to or
+  transitively contains that other Node.
+* Circular references are not allowed.
 
 An object file can only be used once - either in a library or an executable.
-Dynamic libraries don't count as a use - they are just a repackaging.
+Dynamic libraries don't count as a use - they effectively replace the static library.
 
 A dynamic library cannot contain the same static library as another dynamic library.
 
@@ -111,13 +127,13 @@ The build process
 Bob reads the project Bobfile, transiting into
 other-package Bobfiles as packages are mentioned.
 
-Bob assumes that new packages, libraries, etc
-are mentioned in dependency order. That is, when each thing is
-mentioned, everything it depends on, including dependencies inferred by
-include/import statements in source code, has already been mentioned.
-Exception: a Bobfile can refer to previously-unknown top-level packages.
+Bob assumes that new packages, libraries, etc are mentioned in dependency order.
+That is, when each thing is mentioned, everything it depends on, including
+dependencies inferred by include/import statements in source code, has already
+been mentioned. Exception: a Bobfile can refer to previously-unknown top-level
+packages.
 
-The planner scans the Bobfiles, binding files to specific
+The planner thread scans the Bobfiles, binding files to specific
 locations in the filesystem as it goes, and builds the dependency graph.
 
 The file state sequence is:
@@ -129,7 +145,9 @@ The file state sequence is:
     includes_known
     clean
 
-As files become buildable, actions are passed to workers.
+As files become buildable, actions are put into a PriorityQueue ordered by
+the File.number. As workers become available, actions are issued to them for
+processing.
 
 Build results cause the dependency graph to be updated, allowing more actions to
 be issued. Specifically, generated source files are scanned for import/include
@@ -945,17 +963,17 @@ final class Action {
     int     number;    // influences build order
     File[]  inputs;    // files the action directly relies on, specified with initial depends
     File[]  builds;    // files that this action builds
-    File[]  depends;   // files that the action's targets depend on
+    File[]  depends;   // files that the action depend on
     bool    finalised; // true if the action command has been finalised
     bool    issued;    // true if the action has been issued to a worker
 
-    this(Origin origin, Pkg pkg, string name_, string command_, File[] builds_, File[] depends_) {
+    this(Origin origin, Pkg pkg, string name_, string command_, File[] builds_, File[] inputs_) {
         name     = name_;
         command  = command_;
         number   = nextNumber++;
-        inputs   = depends_;
+        inputs   = inputs_;
         builds   = builds_;
-        depends  = depends_;
+        depends  = inputs_;
         errorUnless(!(name in byName), origin, "Duplicate command name=%s", name);
         byName[name] = this;
 
@@ -1011,12 +1029,10 @@ final class Action {
         if (builds.length != 1) {
             fatal("cannot add a dependency to an action that builds more than one file: %s", name);
         }
-        depends ~= depend;
-
-        // set up references and reverse dependencies between builds and depend
-        foreach (built; builds) {
-            depend.dependedBy[built] = true;
-            if (g_print_deps) say("%s depends on %s", built.path, depend.path);
+        if (builds[0] !in depend.dependedBy) {
+            depends ~= depend;
+            depend.dependedBy[builds[0]] = true;
+            if (g_print_deps) say("%s depends on %s", builds[0].path, depend.path);
         }
     }
 
@@ -1238,7 +1254,9 @@ class Node {
     // create a node and place it into the tree
     this(Origin origin, Node parent_, string name_, Privacy privacy_) {
         assert(parent_);
-        errorUnless(dirName(name_) == ".", origin, "Cannot define node with multi-part name '%s'", name_);
+        errorUnless(dirName(name_) == ".",
+                    origin,
+                    "Cannot define node with multi-part name '%s'", name_);
         parent  = parent_;
         name    = name_;
         privacy = privacy_;
@@ -1355,9 +1373,9 @@ final class Pkg : Node {
 // A file
 //
 class File : Node {
-    static File[string]   byPath;       // Files by their path
-    static bool[File]     allBuilt;     // all built files
-    static bool[File]     outstanding;  // outstanding buildable files
+    static File[string]   byPath;      // Files by their path
+    static bool[File]     allBuilt;    // all built files
+    static bool[File]     outstanding; // outstanding buildable files
     static int            nextNumber;
 
     // Statistics
@@ -1366,24 +1384,19 @@ class File : Node {
 
     string     path;                   // the file's path
     int        number;                 // order of file creation
-    bool       scannable;              // true if the file and its includes should be scanned for includes
+    bool       scannable;              // true if the file should be scanned
     bool       built;                  // true if this file will be built by an action
     Action     action;                 // the action used to build this file (null if non-built)
 
-    long       modTime;                // the modification time of the file
-    bool[File] dependedBy;             // Files that depend on this
+    long       modTime;                // the modification time of this file
     bool       used;                   // true if this file has been used already
 
     // state-machine stuff
-    bool       scanned;                // true if this has already been scanned for includes
-    File[]     includes;               // the Files this includes
-    bool[File] includedBy;             // Files that include this
-    bool       clean;                  // true if usable by higher-level files
-    long       includeModTime;         // transitive max of mod_time and includes include_mod_time
-
-    // analysis stuff
-    File       youngestDepend;
-    File       youngestInclude;
+    bool         scanned;                // true if this has already been scanned for includes
+    Origin[File] includes;               // Origins by the Files this includes
+    bool[File]   includedBy;             // Files that include this
+    bool[File]   dependedBy;             // Files that depend on this
+    bool         clean;                  // true if usable by higher-level files
 
     // return a prospective path to a potential file.
     static string prospectivePath(string start, Node parent, string extra) {
@@ -1512,29 +1525,59 @@ class File : Node {
                             "included/imported unknown file %s",
                             entry.trail);
 
-                // add the included file to this file's includes
-                includes ~= *include;
-                include.includedBy[this] = true;
-
-                // tell all files that depend on this one that the include has been added,
-                // so that references between libraries can be established.
+                // add the include
                 if (g_print_deps) say("%s includes/imports %s", this.path, include.path);
-                includeAdded(origin, this, *include);
-
-                // now (after includeAdded so this File's parents have had a chance to add
-                // an enabling reference), add a reference between this file and the included one
-                addReference(origin, *include);
-            }
-
-            // touch includes now that we know what all of them are
-            foreach (include; includes) {
-                include.touch();
+                includes[*include] = origin;
+                include.includedBy[this] = true;
             }
         }
     }
 
-    // An include has been added from includer (which is this or a file this depends on) to included.
-    // Specialisations of File override to infer additional depends.
+    // Add all the relationships implied by this file's includes.
+    // IMPORTANT - called once, just before this file becomes clean,
+    // which means that it is up to date and all its includes are also clean.
+    // The delayed resolution is necessary because includes are discovered in
+    // an arbitrary order, so we have to wait till all the down-stream includes
+    // are discovered before we can work out what they mean.
+    // Here are the implications of an include:
+    // * Each direct or transitive include adds a dependency to this file's dependents.
+    // * This file's dependents (see Binary) may infer extra things from the direct includes.
+    // * Each direct include implies a reference from this to the include.
+    void resolveIncludes() {
+
+        // Resolve consequences of transitive include
+        void resolve(Origin origin, File includer, File included) {
+
+            // Our dependents also depend on the included file.
+            foreach (dependent; dependedBy.keys()) {
+                errorUnless(dependent.action !is null, origin, "%s has no action", dependent.path);
+                dependent.action.addDependency(included);
+            }
+
+            // Transit into included's includes
+            foreach (included2, origin2; included.includes) {
+                resolve(origin2, included, included2);
+            }
+        }
+
+        if (includes.length > 0) {
+            foreach (included, origin; includes) {
+
+                // This file's dependents depend on this file's transitive includes.
+                resolve(origin, this, included);
+
+                // This file's dependents may want to know about the include too.
+                includeAdded(origin, this, included);
+
+                // Now (after includeAdded calls so this File's parents have had a chance to add
+                // an enabling reference), add a reference between this file and the included one.
+                addReference(origin, included);
+            }
+        }
+    }
+
+    // An include has been added from includer to included.
+    // Specialisations of File override to infer linking to in-project libraries.
     void includeAdded(ref Origin origin, File includer, File included) {
         foreach (depend; dependedBy.keys()) {
             depend.includeAdded(origin, includer, included);
@@ -1549,7 +1592,6 @@ class File : Node {
         }
     }
 
-
     // This file's action is about to be issued, and this is the last chance to
     // add dependencies to it. Specialisations should override this method, and at the
     // very least finalise the action's command.
@@ -1561,10 +1603,7 @@ class File : Node {
         return false;
     }
 
-
-    // This file has been touched - work out if its action should be issued
-    // or if it is now clean, transiting to affected items if this becomes clean.
-    // NOTE - nothing can become clean until AFTER all activation has been done by the planner.
+    // Work out if this File's state should change, and if its Action should be issued.
     final void touch() {
         if (clean) return;
         if (g_print_details) say("touching %s", path);
@@ -1574,95 +1613,73 @@ class File : Node {
             // this item's action may need to be issued
             //say("file %s touched", this);
 
-            foreach (depend; action.depends) {
-                if (!depend.clean) {
-                    if (g_print_details) say("%s waiting for %s to become clean", path, depend.path);
-                    return;
+            for (;;) {
+                foreach (depend; action.depends) {
+                    if (!depend.clean) {
+                        if (g_print_details) {
+                            say("%s waiting for %s to become clean", path, depend.path);
+                        }
+                        return;
+                    }
+                    if (newest < depend.modTime) {
+                        newest = depend.modTime;
+                    }
                 }
-                if (newest < depend.includeModTime) {
-                    newest = depend.includeModTime;
-                    youngestDepend = depend;
-                }
-            }
-            // all files this one depends on are clean
+                // all files this one depends on are clean
 
-            // give this file a chance to augment its action
-            if (augmentAction()) {
-                // dependency added - touch this file again to re-check dependencies
-                touch();
+                // give this file a chance to augment its action
+                if (!augmentAction()) {
+                    // No dependencies added - we know our newest dependency modTime
+                    break;
+                }
+
+                // Dependency added - go around again to re-check dependencies
+            }
+
+            // We can issue the action now if this file is out of date
+            if (modTime < newest) {
+                // Out of date - issue action to worker
+                if (g_print_details) {
+                    say("%s is out of date with mod_time %s", this, modTime);
+                }
+                action.issue();
                 return;
             }
             else {
-                // no dependencies were added, so we can issue the action now
-
-                if (modTime < newest) {
-                    // buildable and out of date - issue action to worker
-                    if (g_print_details) {
-                        say("%s is out of date with mod_time %s", this, modTime);
-                        File other      = youngestDepend;
-                        File prevOther = this;
-                        while (other && other.includeModTime > prevOther.modTime) {
-                            say("  %s mod_time %s (younger by %s)",
-                                other,
-                                other.includeModTime,
-                                other.includeModTime - modTime);
-                            other = other.youngestDepend;
-                        }
-                    }
-                    action.issue();
-                    return;
-                }
-                else {
-                    // already up to date - no need for building
-                    if (g_print_details) say("%s is up to date", path);
-                    action = null;
-                    outstanding.remove(this);
-                }
+                // already up to date - no need for building
+                if (g_print_details) say("%s is up to date", path);
+                action = null;
+                outstanding.remove(this);
             }
         }
 
-        if (action)   return;
+        if (action) {
+            // Still waiting for action to be issued or complete
+            return;
+        }
         errorUnless(modTime > 0, Origin(path, 1),
                     "%s (%s) is up to date with zero mod_time!", path, trail);
         // This file is up to date
 
-        // Scan for includes, possibly becoming clean in the process
+        // If we haven't already scanned for includes, do it now.
         if (!scanned) scan();
-        if (clean)    return;
 
-        // Find out if includes are clean and what our effective mod_time is
-        newest = modTime;
-        foreach (include; includes) {
+        foreach (include; includes.keys()) {
             if (!include.clean) {
+                // Can't progress until all our includes are clean
                 return;
             }
-            if (newest < include.includeModTime) {
-                newest = include.includeModTime;
-                youngestInclude = include;
-            }
         }
-        includeModTime = newest;
-        if (g_print_details) {
-            say("%s is clean with effective mod_time %s", this, includeModTime);
-            File other      = youngestInclude;
-            File prevOther = this;
-            while (other && other.includeModTime > prevOther.modTime) {
-                say("  %s mod_time %s (younger by %s)",
-                    other,
-                    other.includeModTime,
-                    other.includeModTime - prevOther.modTime);
-                other = other.youngestInclude;
-            }
-        }
-        // All includes are clean, so we are too
 
+        // Work through all the implications of this file's includes, now that
+        // all owr down-stream includes are clean.
+        resolveIncludes();
+
+        // We are now sqeaky clean
         clean = true;
 
         // touch everything that includes or depends on this
-        foreach (other; includedBy.byKey()) {
-            other.touch();
-        }
-        foreach (other; dependedBy.byKey()) {
+        foreach (other; chain(includedBy.keys(), dependedBy.keys())) {
             other.touch();
         }
     }
@@ -1796,12 +1813,8 @@ abstract class Binary : File {
 
     override void includeAdded(ref Origin origin, File includer, File included) {
         // A file we depend on (includer) has included another file (included).
-        // If this means that this 'needs' another Binary, remember the fact
-        // and also add a dependency on that other Binary. Note that the dependency
-        // is often not 'real' (a StaticLib doesn't actually depend on other StaticLibs),
-        // but it is a very useful simplification when working out which libraries an
-        // Exe depends on, and which StaticLibs a DynamicLib has to contain.
-        if (g_print_deps) say("%s: %s includes %s", this.path, includer.path, included.path);
+        // This might mean that this Binary requires another (this is how we find out
+        // out which libraries to link).
         Binary *includerContainer = includer in byContent;
         if (includerContainer && *includerContainer is this) {
             Binary *includedContainer = included in byContent;
@@ -1814,11 +1827,9 @@ abstract class Binary : File {
                 if (g_print_deps) say("%s requires %s", this.path, includedContainer.path);
                 reqBinaries[*includedContainer] = true;
 
-                // add a dependancy and a reference
+                // add a reference
                 addReference(origin, *includedContainer,
                              format(" because %s includes %s", includer.path, included.path));
-                action.addDependency(*includedContainer);
-                if (g_print_deps) say("%s requires %s", this.path, includedContainer.path);
             }
         }
     }
@@ -1858,11 +1869,7 @@ final class StaticLib : Binary {
         // finding out what libraries are needed.
         super(origin, pkg, name_, _path, publicSources, protectedSources);
 
-        // Decide on an action. NOTE - the library depends on its objs AND
-        // its headers so that an include from any of its sources to another
-        // library is seen by includeAdded(), and sets up a reference to that
-        // library. We add the headers after creating the action in order to keep
-        // the headers separate from inputs.
+        // Decide on an action.
         string actionName = format("%-15s %s", "StaticLib", path);
         if (objs.length > 0) {
           // A proper static lib with object files
@@ -1870,6 +1877,9 @@ final class StaticLib : Binary {
           errorUnless(linkCommand && linkCommand.staticLib.length, origin,
                       "No link command for static lib from '%s'", sourceExt);
           action = new Action(origin, pkg, actionName, linkCommand.staticLib, [this], objs);
+
+          // Add dependencies on the headers too so that includeAdded() will be called on us
+          // for includes those headers make.
           foreach (header; headers) {
               action.addDependency(header);
           }
