@@ -1239,7 +1239,6 @@ class Node {
     Node[]  children;
     Node[]  refers;
 
-    // assorted Object overrides for printing and use as an associative-array key
     override string toString() const {
         return trail;
     }
@@ -1693,6 +1692,12 @@ class File : Node {
         if (a is null) return  -1;
         return a.number - number;
     }
+
+    // Print a file as its path.
+    override string toString() const {
+        return path;
+    }
+
 }
 
 
@@ -1942,7 +1947,7 @@ void neededLibs(File             target,
                     staticLibs ~= slib;
                 }
             }
-            else {
+            else if (*dynamic !is target) {
                 accumulate(*dynamic);
             }
         }
@@ -1963,6 +1968,8 @@ void neededLibs(File             target,
     staticLibs.sort();
     dynamicLibs.sort();
     sysLibs.sort();
+
+    //say("%s requires %s,%s,%s", target, staticLibs, dynamicLibs, sysLibs);
 }
 
 
