@@ -1,5 +1,5 @@
 /*
- * Copyright 2012, Graham St Jack.
+ * Copyright 2012-2013, Graham St Jack.
  *
  * This file is part of bob, a software build tool.
  *
@@ -19,7 +19,7 @@
 
 //
 // The bob-config utility. Sets up a build directory from which
-// a project can be built from source by the 'bob' utility.
+// a project can be built from source by the 'bob' build utility.
 // The built files are all located in the build directory, away from the
 // source. Multiple source repositories are supported.
 //
@@ -44,6 +44,11 @@ import std.ascii;
 import core.stdc.stdlib;
 import core.sys.posix.sys.stat;
 
+// TODO
+// * Use the new std.process module when it becomes available to
+//   do all the interaction with environment variables.
+// * Port to Windows.
+// * Add checking for external dependencies.
 
 //================================================================
 // Helpers
@@ -142,18 +147,14 @@ string[] fromEnv(string varname) {
 // value of executable.
 //
 void update(string path, string content, bool executable) {
-    bool clean = false;
-    if (exists(path)) {
-        clean = content == readText(path);
-    }
-    if (!clean) {
+    if (!exists(path) || content != readText(path)) {
         std.file.write(path, content);
     }
 
     uint mode = executable ? octal!744 : octal!644;
     uint attr = getAttributes(path);
     if (attr != mode) {
-        chmod(toStringz(path), mode);
+        setMode(path, mode);
     }
 }
 

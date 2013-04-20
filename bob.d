@@ -17,25 +17,6 @@
  * along with Bob.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import process;
-
-import std.stdio;
-import std.ascii;
-import std.string;
-import std.format;
-import std.algorithm;
-import std.range;
-import std.file;
-import std.path;
-import std.conv;
-import std.datetime;
-import std.getopt;
-import std.concurrency;
-import std.functional;
-import std.exception;
-
-import core.sys.posix.signal;
-
 // TODO:
 // * Port to windows.
 //
@@ -152,15 +133,50 @@ after they are up to date, and the dependency graph and action commands are
 adjusted accordingly.
 */
 
+import process;
+
+import std.stdio;
+import std.ascii;
+import std.string;
+import std.format;
+import std.algorithm;
+import std.range;
+import std.file;
+import std.path;
+import std.conv;
+import std.datetime;
+import std.getopt;
+import std.concurrency;
+import std.functional;
+import std.exception;
+
 //----------------------------------------------------------------------------------------
 // Platform-specific stuff
 //----------------------------------------------------------------------------------------
 
 version(Posix) {
+    import core.sys.posix.signal;
+
     string copyCmd = "cp";
+
+    int mykill(pid_t pid, int sig) {
+        return kill(pid, sig);
+    }
 }
 else version(Windows) {
+    // NOTE:
+    // The Windows port is a work in progress and hasn't been tested yet.
+    // The main sticking point is killing spawned processes - there doesn't seem to be
+    // a way of doing that for third-party processes (ie ones whose source you can't change).
+    // The work in progress is all those little issues like slash vs backslash.
+
+    import core.stdc.signal;
+
     string copyCmd = "copy";
+
+    int mykill(pid_t pid, int sig) {
+        return 0;
+    }
 }
 
 
@@ -274,7 +290,7 @@ class Killer {
     void launched(string worker, Pid child) {
         synchronized(this) {
             if (bailed) {
-                kill(child.processID, SIGTERM);
+                mykill(child.processID, SIGTERM);
             }
             else {
                 children[child] = true;
@@ -295,7 +311,7 @@ class Killer {
             if (!bailed) {
                 bailed = true;
                 foreach (child; children.keys()) {
-                    kill(child.processID, SIGTERM);
+                    mykill(child.processID, SIGTERM);
                 }
                 return false;
             }
@@ -321,7 +337,6 @@ __gshared Tid bailerTid;
 
 void doBailer() {
     void bail(int sig) {
-        say("Got signal %s", sig);
         killer.bail();
     }
 
@@ -991,7 +1006,7 @@ final class Action {
 
         // Recognise in-project tools in the command.
         foreach (token; split(command)) {
-            if (token.startsWith(["dist/bin", "priv"])) {
+            if (token.startsWith([buildPath("dist", "bin"), "priv"])) {
                 // Find the tool
                 File *tool = token in File.byPath;
                 errorUnless(tool !is null, origin, "Unknown in-project tool %s", token);
@@ -1090,7 +1105,7 @@ final class Action {
                         values = ["src", "obj"];
                     }
                     else if (varname == "PROJ_LIB") {
-                        values = ["dist/lib", "obj"];
+                        values = [buildPath("dist", "lib"), "obj"];
                     }
                     else if (varname == "LIBS") {
                         values = libs;
@@ -1559,8 +1574,15 @@ class File : Node {
     // * Each direct include implies a reference from this to the include.
     void resolveIncludes() {
 
+        bool[File] got;
+
         // Resolve consequences of transitive include
         void resolve(Origin origin, File includer, File included) {
+
+            if (included in got) {
+                return;
+            }
+            got[included] = true;
 
             // Our dependents also depend on the included file.
             foreach (dependent; dependedBy.keys()) {
@@ -1574,19 +1596,17 @@ class File : Node {
             }
         }
 
-        if (includes.length > 0) {
-            foreach (included, origin; includes) {
+        foreach (included, origin; includes) {
+            // This file's dependents may want to know about the include too.
+            includeAdded(origin, this, included);
 
-                // This file's dependents depend on this file's transitive includes.
-                resolve(origin, this, included);
+            // Now (after includeAdded calls so this File's parents have had a chance to
+            // add an enabling reference), add a reference between this file and the
+            // included one.
+            addReference(origin, included);
 
-                // This file's dependents may want to know about the include too.
-                includeAdded(origin, this, included);
-
-                // Now (after includeAdded calls so this File's parents have had a chance to add
-                // an enabling reference), add a reference between this file and the included one.
-                addReference(origin, included);
-            }
+            // This file's dependents depend on this file's transitive includes.
+            resolve(origin, this, included);
         }
     }
 
@@ -2646,9 +2666,8 @@ void doWork(bool printActions, uint index, Tid plannerTid) {
 
         // launch child process to do the action, then wait for it to complete
 
-        auto input  = std.stdio.File("/dev/null", "r");
         auto output = std.stdio.File(resultsPath, "w");
-        Pid  child  = spawnProcess(command, input, output, output);
+        Pid  child  = spawnProcess(command, std.stdio.stdin, output, output);
 
         killer.launched(myName, child);
         success = wait(child) == 0;
