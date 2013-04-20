@@ -95,8 +95,7 @@ target to specify on the command-line. This isn't a problem because:
 * Bob determines what needs to be done quickly.
 * Bob's log output is very clean.
 * Bob builds files (mostly) in definition order, and stops the build when an error
-  occurs, so you quickly get back to the point of failure when getting code past
-  the compiler.
+  occurs, so you quickly get back to the point of failure during development.
 * Bob runs and evaluates unit tests (mostly) in definition order, so if you have
   unit tests, you quickly get to the point of failure during debugging.
 
