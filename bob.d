@@ -1570,7 +1570,7 @@ class File : Node {
             }
         }
 
-        if (includes.length > 0) {
+        //if (includes.length > 0) {
             foreach (included, origin; includes) {
 
                 // This file's dependents depend on this file's transitive includes.
@@ -1583,7 +1583,7 @@ class File : Node {
                 // an enabling reference), add a reference between this file and the included one.
                 addReference(origin, included);
             }
-        }
+        //}
     }
 
     // An include has been added from includer to included.
@@ -1685,7 +1685,7 @@ class File : Node {
         // all owr down-stream includes are clean.
         resolveIncludes();
 
-        // We are now sqeaky clean
+        // We are now squeaky clean
         clean = true;
 
         // touch everything that includes or depends on this
