@@ -2,7 +2,7 @@ misc transmogrify : bin;
 
 static-lib low : macros.h;
 
-static-lib mid :
+public-lib mid :
                 one.h two.H
                :
                 one.c two.CPP
@@ -14,7 +14,7 @@ test-exe test-two : test_two.cpp;
 dynamic-lib base : low mid;
 
 
-static-lib extra : extra.h : extra.cpp;
+public-lib extra : extra.h : extra.cpp;
 
 dynamic-lib extra : extra;
 

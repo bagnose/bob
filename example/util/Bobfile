@@ -2,3 +2,4 @@ refer base based;
 
 dist-exe util1 : util1.cpp;
 dist-exe util2 : util2.d;
+dist-exe util3 : util3.cpp;

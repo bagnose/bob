@@ -37,9 +37,6 @@ import std.exception;
 import core.sys.posix.signal;
 
 // TODO:
-// * export-lib rule that auto-copies public headers. A dynamic lib incorporating
-//   a public static lib has to only contain exported static libs. An exported-lib
-//   that is not incorporated into a dynamic lib is also copied into dist/lib.
 // * Port to windows.
 //
 // Lower priority wish-list:
@@ -154,6 +151,18 @@ be issued. Specifically, generated source files are scanned for import/include
 after they are up to date, and the dependency graph and action commands are
 adjusted accordingly.
 */
+
+//----------------------------------------------------------------------------------------
+// Platform-specific stuff
+//----------------------------------------------------------------------------------------
+
+version(Posix) {
+    string copyCmd = "cp";
+}
+else version(Windows) {
+    string copyCmd = "copy";
+}
+
 
 //-----------------------------------------------------------------------------------------
 // PriorityQueue - insert items in any order, and remove largest-first
@@ -1240,7 +1249,6 @@ class Node {
     Node[]  children;
     Node[]  refers;
 
-    // assorted Object overrides for printing and use as an associative-array key
     override string toString() const {
         return trail;
     }
@@ -1299,7 +1307,10 @@ class Node {
                      size_t     depth        = 0,
                      Privacy    allowPrivacy = Privacy.PROTECTED,
                      bool[Node] checked      = null) {
-        errorUnless(depth < 100, origin, "circular reference involving %s referring to %s", this, other);
+        errorUnless(depth < 100, origin,
+                    "circular reference involving %s referring to %s",
+                    this,
+                    other);
         //say("for %s: checking if %s allowsReferenceTo %s", origin.path, this, other);
         if (other is this || other.isVisibleDescendantOf(this, allowPrivacy)) {
             if (g_print_details) say("%s allows reference to %s via containment", this, other);
@@ -1313,9 +1324,12 @@ class Node {
                 if (node.allowsRefTo(origin,
                                      other,
                                      depth+1,
-                                     node.parent is this.parent ? Privacy.SEMI_PROTECTED : Privacy.PUBLIC,
+                                     node.parent is this.parent ?
+                                     Privacy.SEMI_PROTECTED : Privacy.PUBLIC,
                                      checked)) {
-                    if (g_print_details) say("%s allows reference to %s via explicit reference", this, other);
+                    if (g_print_details) {
+                        say("%s allows reference to %s via explicit reference", this, other);
+                    }
                     return true;
                 }
             }
@@ -1703,6 +1717,12 @@ class File : Node {
         if (a is null) return  -1;
         return a.number - number;
     }
+
+    // Print a file as its path.
+    override string toString() const {
+        return path;
+    }
+
 }
 
 
@@ -1728,6 +1748,7 @@ abstract class Binary : File {
 
     File[]       objs;
     File[]       headers;
+    bool[File]   publics;
     bool[SysLib] reqSysLibs;
     bool[Binary] reqBinaries;
     string       sourceExt;  // The source extension object files are compiled from.
@@ -1773,7 +1794,8 @@ abstract class Binary : File {
 
                 string actionName = format("%-15s %s", "Compile", sourceFile.path);
 
-                obj.action = new Action(origin, pkg, actionName, compile.command, [obj], [sourceFile]);
+                obj.action = new Action(origin, pkg, actionName, compile.command,
+                                        [obj], [sourceFile]);
             }
             else if (generate) {
                 // Generate more source files from sourceFile.
@@ -1806,6 +1828,11 @@ abstract class Binary : File {
             else {
                 // No compile or generate commands - assume it is a header file.
                 headers ~= sourceFile;
+            }
+
+            if (privacy == Privacy.PUBLIC) {
+                // This file may need to be exported
+                publics[sourceFile] = true;
             }
         }
 
@@ -1840,6 +1867,20 @@ abstract class Binary : File {
                 // add a reference
                 addReference(origin, *includedContainer,
                              format(" because %s includes %s", includer.path, included.path));
+
+                // Insist that if includer is a public file in a public static lib,
+                // all its includes have to also be public files in public static libs.
+                // This is necessary because they all need to be copied into dist/include
+                // for export.
+                StaticLib slib = cast(StaticLib) *includerContainer;
+                if (slib !is null && slib.isPublic && includer in slib.publics) {
+                    StaticLib other = cast(StaticLib) *includedContainer;
+                    errorUnless(other !is null && other.isPublic && included in other.publics,
+                                origin,
+                                "Exported %s cannot include non-exported %s",
+                                includer,
+                                included);
+                }
             }
         }
     }
@@ -1866,17 +1907,30 @@ abstract class Binary : File {
 final class StaticLib : Binary {
 
     string uniqueName;
+    bool   isPublic;
 
     this(ref Origin origin, Pkg pkg, string name_,
-         string[] publicSources, string[] protectedSources) {
+         string[] publicSources, string[] protectedSources, bool isPublic_) {
 
-        // Decide on a name and path for the library.
+        isPublic = isPublic_;
+
+        // Decide on a name for the library.
         uniqueName = std.array.replace(buildPath(pkg.trail, name_), dirSeparator, "-") ~ "-s";
         if (name_ == pkg.name) uniqueName = std.array.replace(pkg.trail, dirSeparator, "-") ~ "-s";
-        string _path = buildPath("obj", format("lib%s.a", uniqueName));
+        string _basename = format("lib%s.a", uniqueName);
 
-        // Super-constructor takes care of compiling to object files and
-        // finding out what libraries are needed.
+        // Decide on a path for the library.
+        string _path;
+        if (isPublic) {
+            // The library is distributable.
+            _path = buildPath("dist", "lib", _basename);
+        }
+        else {
+            // The library is private to the project.
+            _path = buildPath("obj", _basename);
+        }
+
+        // Super-constructor takes care of code generation and compiling to object files.
         super(origin, pkg, name_, _path, publicSources, protectedSources);
 
         // Decide on an action.
@@ -1897,6 +1951,22 @@ final class StaticLib : Binary {
         else {
           // A place-holder file to fit in with dependency tracking
           action = new Action(origin, pkg, actionName, "DUMMY", [this], headers);
+        }
+
+        if (isPublic) {
+            // This library's public sources are distributable, so we copy them into dist/include
+            // TODO Convert from "" to <> #includes in .h files
+            string copyBase = buildPath("dist", "include");
+            foreach (source; publics.keys()) {
+                string destPath = prospectivePath(copyBase, this, source.name);
+                File copy = new File(origin, this, source.name ~ "-copy",
+                                     Privacy.PRIVATE, destPath, false, true);
+
+                copy.action = new Action(origin, pkg,
+                                         format("%-15s %s", "Export", source.path),
+                                         copyCmd ~ " ${INPUT} ${OUTPUT}",
+                                         [copy], [source]);
+            }
         }
     }
 }
@@ -1952,7 +2022,7 @@ void neededLibs(File             target,
                     staticLibs ~= slib;
                 }
             }
-            else {
+            else if (*dynamic !is target) {
                 accumulate(*dynamic);
             }
         }
@@ -1973,6 +2043,8 @@ void neededLibs(File             target,
     staticLibs.sort();
     dynamicLibs.sort();
     sysLibs.sort();
+
+    //say("%s requires %s,%s,%s", target, staticLibs, dynamicLibs, sysLibs);
 }
 
 
@@ -2196,7 +2268,7 @@ void miscFile(ref Origin origin, Pkg pkg, string dir, string name, string dest) 
             destFile.action = new Action(origin,
                                          pkg,
                                          format("%-15s %s", "Copy", destFile.path),
-                                         format("cp %s %s", sourceFile.path, destFile.path),
+                                         format("%s %s %s", copyCmd, sourceFile.path, destFile.path),
                                          [destFile],
                                          [sourceFile]);
         }
@@ -2255,9 +2327,14 @@ void processBobfile(string indent, Pkg pkg) {
                     Pkg* other = cast(Pkg*) (trail in Node.byTrail);
                     if (other is null) {
                         // create the referenced package which must be top-level, then refer to it
-                        errorUnless(dirName(trail) == ".", statement.origin,
-                                    "Previously-unknown referenced package %s has to be top-level", trail);
-                        Pkg newPkg = new Pkg(statement.origin, Node.byTrail["root"], trail, Privacy.PUBLIC);
+                        errorUnless(dirName(trail) == ".",
+                                    statement.origin,
+                                    "Previously-unknown referenced package %s has to be top-level",
+                                    trail);
+                        Pkg newPkg = new Pkg(statement.origin,
+                                             Node.byTrail["root"],
+                                             trail,
+                                             Privacy.PUBLIC);
                         processBobfile(indent, newPkg);
                         pkg.addReference(statement.origin, newPkg);
                     }
@@ -2271,6 +2348,7 @@ void processBobfile(string indent, Pkg pkg) {
             break;
 
             case "static-lib":
+            case "public-lib":
             {
                 errorUnless(statement.targets.length == 1, statement.origin,
                             "Can only have one static-lib name per statement");
@@ -2278,7 +2356,8 @@ void processBobfile(string indent, Pkg pkg) {
                                               pkg,
                                               statement.targets[0],
                                               statement.arg1,
-                                              statement.arg2);
+                                              statement.arg2,
+                                              statement.rule == "public-lib");
             }
             break;
 
